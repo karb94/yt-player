@@ -1,6 +1,8 @@
 {
   description = "yt-player";
-  nixConfig.bash-prompt-prefix = "\n[nix develop]";
+  nixConfig.bash-prompt-prefix = ''
+
+    [nix develop]'';
   inputs = { nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable"; };
   outputs = { self, nixpkgs, ... }:
     let
@@ -9,14 +11,23 @@
       pythonPkgs = ps:
         with ps; [
           feedparser
-          pandas
-          yt-dlp
           ipython
-          sqlite-utils
+          pandas
           sqlalchemy
+          sqlite-utils
+          yt-dlp
+          pygobject3
         ];
-      python = pkgs.python3.withPackages pythonPkgs;
+      myPython = pkgs.python3.withPackages pythonPkgs;
     in {
-      devShells.${system}.default = pkgs.mkShell { buildInputs = [ python ]; };
+      devShells.${system}.default = pkgs.mkShell {
+        buildInputs = with pkgs; [
+          myPython
+          gtk4
+          sqlite-utils
+          gobject-introspection
+          libadwaita
+        ];
+      };
     };
 }
