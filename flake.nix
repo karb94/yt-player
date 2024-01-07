@@ -17,6 +17,7 @@
           sqlite-utils
           yt-dlp
           pygobject3
+          pygobject-stubs
         ];
       myPython = pkgs.python3.withPackages pythonPkgs;
     in {

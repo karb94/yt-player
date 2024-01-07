@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, LargeBinary, MetaData, String, Table
+from sqlalchemy import Column, DateTime, ForeignKey, MetaData, String, Table
 
 metadata = MetaData()
 
