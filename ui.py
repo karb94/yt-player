@@ -1,27 +1,63 @@
-from collections.abc import Sequence
-from sqlalchemy import Row
+from datetime import datetime
+from subprocess import Popen
+from threading import Thread
+from dateutil.relativedelta import relativedelta
+
+from IPython.core.debugger import set_trace
 from backend import Backend
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Gdk, Adw
-import signal
+from gi.repository import Gtk, Gdk, Adw, GLib
 
 
+css_provider = Gtk.CssProvider()
+css_provider.load_from_path('style.css')
+Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-def buildCardsStack(videos: Sequence[Row]):
-    list_box = Gtk.ListBox()
-    for video in videos:
+
+def parse_progress(download: dict):
+    # print(progress["status"])
+    del download["info_dict"]
+    # if progress["status"] == "
+    if "fragment_count" in download and "fragment_index" in download:
+        if download["fragment_index"] > download["fragment_count"]+1:
+            pp(download)
+            raise KeyError(f"No keys to calculate errors. Keys available {pp(list(download))}")
+        else:
+            progress = download["fragment_index"] / (download["fragment_count"]+1)
+    elif all(k in download for k in ("downloaded_bytes", "total_bytes")):
+        progress = download["downloaded_bytes"] / download["total_bytes"]
+    elif all(k in download for k in ("downloaded_bytes", "total_bytes_estimate")):
+        progress = download["downloaded_bytes"] / download["total_bytesestimate"]
+    elif "fragment_count" in download and "fragment_index" in download:
+        if download["fragment_index"] > download["fragment_count"]:
+            pp(download)
+            raise KeyError(f"No keys to calculate errors. Keys available {pp(list(download))}")
+        else:
+            progress = download["fragment_index"] / (download["fragment_count"]+1)
+    else:
+        return 'NO PROGRESS'
+
+    # progress = download["downloaded_bytes"] / download["total_bytes"]
+    # eta = download["eta"]
+    # speed = download["speed"]
+    # elapsed = download["elapsed"]
+    return progress
+
+
+class VideoCard(Gtk.ListBoxRow):
+    def __init__(self, video, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.video = video
+        grid = Gtk.Grid()
+        grid.props.width_request = 300
+        self.set_child(grid)
         # img = Gtk.Picture(file=img_path, vexpand=True, hexpand=True)
         img = Gtk.Picture.new_for_filename(video.thumbnail_path)
         img.props.halign = Gtk.Align.START
         img.props.can_shrink = False
-        # img.set_hexpand(True)
-        # box = Gtk.Grid(height_request=200, vscroll_policy=Gtk.ScrollablePolicy.NATURAL)
-        box = Gtk.Grid()
-        # box.set_property("height-request", 200)
-        # box.props.height_request = 200
-        box.attach(child=img, column=1, row=1, width=1, height=3) 
+        grid.attach(child=img, column=1, row=1, width=1, height=3) 
         title_label = Gtk.Label(
             label=f'<span weight="bold" size="x-large">{video.title}</span>',
             use_markup=True,
@@ -29,20 +65,45 @@ def buildCardsStack(videos: Sequence[Row]):
             vexpand=True,
             margin_start=10,
         )
-        box.attach(child=title_label, column=2, row=1, width=1, height=1) 
+        grid.attach(child=title_label, column=2, row=1, width=1, height=1) 
         channel_label = Gtk.Label(
             label=video.channel_title,
             halign=Gtk.Align.START,
             vexpand=True,
             margin_start=10,
         )
-        box.attach(child=channel_label, column=2, row=2, width=1, height=1) 
-        url_label = Gtk.Label(label=video.thumbnail_url, halign=Gtk.Align.START, vexpand=True, selectable=True, margin_start=10)
-        box.attach(child=url_label, column=2, row=3, width=1, height=1) 
-        list_box_row = Gtk.ListBoxRow()
-        list_box_row.set_child(box)
-        list_box.append(list_box_row)
-    return list_box
+        grid.attach(child=channel_label, column=2, row=2, width=1, height=1) 
+        time_since_publication = relativedelta(datetime.now(), video.publication_dt)
+        if time_since_publication.days:
+            days = time_since_publication.days
+            s = "s" if days > 1 else ""
+            ago_str = f"{days} day{s} ago"
+        elif time_since_publication.hours:
+            hours = time_since_publication.hours
+            s = "s" if hours > 1 else ""
+            ago_str = f"{hours} hour{s} ago"
+        else:
+            minutes = time_since_publication.minutes
+            s = "s" if minutes != 1 else ""
+            ago_str = f"{minutes} minute{s} ago"
+        publication_label = Gtk.Label(
+            label=ago_str,
+            halign=Gtk.Align.START,
+            vexpand=True,
+            margin_start=10,
+        )
+        grid.attach(child=publication_label, column=2, row=3, width=1, height=1) 
+        self.progress_bar = Gtk.ProgressBar(
+            hexpand=True,
+            show_text=True,
+            # margin_start=10,
+            # margin_end=30,
+        )
+        self.progress_bar_label = self.progress_bar.get_first_child()
+        self.progress_bar_label.props.halign = Gtk.Align.START
+        self.progress_bar_label.props.margin_start = 10
+        grid.attach(child=self.progress_bar, column=2, row=4, width=1, height=1) 
+
 
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, backend: Backend, *args, **kwargs):
@@ -58,7 +119,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.scrolled_window = Gtk.ScrolledWindow()
         self.set_child(self.scrolled_window)
         videos = self.backend.query_videos()
-        self.list_box = buildCardsStack(videos)
+        self.list_box = Gtk.ListBox()
+        for video in videos:
+            self.list_box.append(VideoCard(video))
         # self.scrolled_window.set_child(self.list_box)
         self.box.append(self.list_box)
         self.scrolled_window.set_child(self.box)
@@ -70,31 +133,27 @@ class MainWindow(Gtk.ApplicationWindow):
         self.add_controller(evk)
 
     def key_press(self, event, keyval, keycode, state):
-        if keyval == Gdk.KEY_j: # and state & Gdk.ModifierType.CONTROL_MASK:
-            print("Some key pressed", keyval)
-            print(self.list_box.get_row_at_y(2))
-            print(self.list_box.get_row_at_y(3))
-            print(self.list_box.get_row_at_index(2))
-            print(self.list_box.get_row_at_index(3))
-            self.list_box.select_row(self.list_box.get_row_at_index(5))
-
-    def on_key_press_event(self, widget, event):
-
-        print("Key press on widget: ", widget)
-        print("          Modifiers: ", event.state)
-        print("      Key val, name: ", event.keyval, Gdk.keyval_name(event.keyval))
-
-        # check the event modifiers (can also use SHIFTMASK, etc)
-        ctrl = (event.state & Gdk.ModifierType.CONTROL_MASK)
-
-        # see if we recognise a keypress
-        if ctrl and event.keyval == Gdk.KEY_j:
-            self.shortcut_hits += 1
-            self.update_label_text()
-
-    def update_label_text(self):
-        # Update the label based on the state of the hit variable
-        self.label.set_text(f"Shortcut pressed {self.shortcut_hits} times")
+        match keyval:
+            case Gdk.KEY_j:
+                self.list_box.child_focus(Gtk.DirectionType.TAB_FORWARD)
+            case Gdk.KEY_k:
+                self.list_box.child_focus(Gtk.DirectionType.TAB_BACKWARD)
+            case Gdk.KEY_d:
+                progress_bar = self.list_box.get_focus_child().progress_bar
+                def progress_hook(download: dict):
+                    progress = parse_progress(download)
+                    GLib.idle_add(progress_bar.set_fraction, progress)
+                id = self.list_box.get_focus_child().video.id
+                thread = Thread(
+                    target=self.backend.download_video,
+                    args=(id,),
+                    kwargs=dict(progress_hooks=[progress_hook])
+                )
+                thread.start()
+            case Gdk.KEY_p:
+                id = self.list_box.get_focus_child().video.id
+                video_path = self.backend.get_video_path(id)
+                Popen(('mpv', video_path))
 
 
 class MyApp(Adw.Application):

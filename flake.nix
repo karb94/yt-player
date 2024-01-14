@@ -13,21 +13,22 @@
           feedparser
           ipython
           pandas
+          pygobject-stubs
+          pygobject3
           sqlalchemy
           sqlite-utils
           yt-dlp
-          pygobject3
-          pygobject-stubs
         ];
       myPython = pkgs.python3.withPackages pythonPkgs;
     in {
       devShells.${system}.default = pkgs.mkShell {
         buildInputs = with pkgs; [
-          myPython
-          gtk4
-          sqlite-utils
+          ffmpeg
           gobject-introspection
+          gtk4
           libadwaita
+          myPython
+          sqlite-utils
         ];
       };
     };

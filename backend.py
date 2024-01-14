@@ -1,5 +1,6 @@
 from collections.abc import Iterator, Sequence
 from datetime import datetime
+from os.path import isfile
 from pathlib import Path
 import re
 
@@ -9,8 +10,13 @@ from typing import Sequence
 from sqlalchemy import insert, select, update, bindparam, Row
 from sqlalchemy.engine.base import Engine
 from db import metadata, channel_table, video_table
-from download import download_thumbnail
+from download import download_thumbnail, download_video
 from IPython.core.debugger import set_trace
+from threading import Thread
+from yt_dlp import YoutubeDL
+from urllib.request import urlretrieve
+from pprint import pp
+from collections.abc import Callable
 
 
 VIDEO_ATTRIBUTES = [
@@ -20,12 +26,21 @@ VIDEO_ATTRIBUTES = [
     "media_thumbnail",
     "published",
 ]
+FORMATS_RANKING = (
+    "bestvideo[width=2560][vcodec=vp09.00.50.08][ext=mp4]+bestaudio",
+    "bestvideo[width=2560][vcodec=vp9][ext=mp4]+bestaudio",
+    "bestvideo[width=2560][vcodec=vp09.00.50.08]+bestaudio",
+    "bestvideo[width=2560]+bestaudio",
+    "bestvideo[width<=2560]+bestaudio",
+    "best",
+)
 FEED_PREFIX = "https://www.youtube.com/feeds/videos.xml?channel_id="
 channel_id_regex = re.compile(re.escape(FEED_PREFIX) + r"([\w-]{24})")
 FEEDS = [
     "https://www.youtube.com/feeds/videos.xml?channel_id=UCXuqSBlHAE6Xw-yeJA0Tunw",
     "https://www.youtube.com/feeds/videos.xml?channel_id=UCBJycsmduvYEL83R_U4JriQ",
 ]
+
 
 def extract_channel_id(feed: str) -> str:
     match = channel_id_regex.fullmatch(feed)
@@ -34,11 +49,28 @@ def extract_channel_id(feed: str) -> str:
     else:
         return match.group(1)
 
+
+get_thumbnail_url = "http://img.youtube.com/vi/{video_id}/mqdefault.jpg".format
+
+
+def download_thumbnail(video_id: str, dir: str) -> str:
+    thumbnail_dir = Path(dir)
+    thumbnail_dir.mkdir(parents=True, exist_ok=True)
+    url = get_thumbnail_url(video_id=video_id)
+    ext = Path(url).suffix
+    filename = video_id + ext
+    thumbnail_path = thumbnail_dir / filename
+    urlretrieve(url, thumbnail_path)
+    return str(thumbnail_path)
+
+
 class Backend:
-    def __init__(self, engine: Engine, thumbnail_dir: str) -> None:
+    def __init__(self, engine: Engine, thumbnail_dir: str, video_dir: str) -> None:
         self.engine = engine
         self.thumbnail_dir = thumbnail_dir
         Path(self.thumbnail_dir).mkdir(parents=True, exist_ok=True)
+        self.video_dir = video_dir
+        Path(self.video_dir).mkdir(parents=True, exist_ok=True)
 
         metadata.drop_all(self.engine)
         metadata.create_all(self.engine)
@@ -162,14 +194,54 @@ class Backend:
 
     def query_videos(self) -> Sequence[Row]:
         with self.engine.begin() as conn:
-            stmt = (
-                select(video_table, channel_table.c.title.label("channel_title"))
-                .join(channel_table)
-                .order_by(video_table.c.publication_dt)
-            )
             query_result = conn.execute(
                 select(video_table, channel_table.c.title.label("channel_title"))
                 .join(channel_table)
-                .order_by(video_table.c.publication_dt)
+                .order_by(video_table.c.publication_dt.desc())
             )
         return query_result.all()
+
+    def download_video(self, id: str, **kwargs):
+        with self.engine.begin() as conn:
+            query_result = conn.execute(
+                select(video_table.c.url)
+                .filter_by(id=id)
+            )
+            url = query_result.scalar_one_or_none()
+        if url is None:
+            raise ValueError(f"No video with id {id} exists")
+        ext = "mkv"
+        video_path = f"{self.video_dir}/{id}.{ext}"
+        options = {
+            "format": "/".join(FORMATS_RANKING),
+            "outtmpl": dict(default=video_path),
+            "merge_output_format": ext,
+            "noprogress": True,
+        }
+        options.update(kwargs)
+        with YoutubeDL(options) as ydl:
+            error_code = ydl.download(url)
+        if error_code != 0:
+            raise ConnectionError(f"Download of video with id {id} failed")
+        if not Path(video_path).is_file():
+            raise FileNotFoundError("Video was downloaded but file is not there")
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(video_table)
+                .filter_by(id=id)
+                .values(video_path=video_path)
+            )
+
+    def get_video_path(self, id):
+        with self.engine.begin() as conn:
+            query_result = conn.execute(
+                select(video_table.c.video_path)
+                .filter_by(id=id)
+            )
+            path = query_result.scalar_one_or_none()
+        if path is None:
+            raise ValueError(f"No path exists for video with id {id}")
+        if not Path(path).is_file():
+            raise ValueError(f"No video in path {path} exists")
+        return path
+

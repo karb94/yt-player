@@ -4,7 +4,8 @@ import sys
 from backend import Backend
 
 
-THUMBNAILS_DIR = "thumbnails"
+THUMBNAIL_DIR = "thumbnails"
+VIDEO_DIR = "videos"
 
 # cards = buildCards(img_paths)
 # win = MyWindow(cards)
@@ -13,6 +14,6 @@ THUMBNAILS_DIR = "thumbnails"
 # Gtk.main()
 
 engine = create_engine('sqlite:///test.db')
-backend = Backend(engine, THUMBNAILS_DIR)
+backend = Backend(engine=engine, thumbnail_dir=THUMBNAIL_DIR, video_dir=VIDEO_DIR)
 app = MyApp(backend=backend, application_id="com.github.karb94.yt-player")
 app.run(sys.argv)
