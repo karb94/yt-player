@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, MetaData, String, Table
+from sqlalchemy import Column, DateTime, ForeignKey, MetaData, String, Table, Boolean
 
 metadata = MetaData()
 
@@ -15,9 +15,11 @@ video_table = Table(
     Column("id", String, primary_key=True),
     Column("channel_id", ForeignKey("channel.id")),
     Column("title", String()),
-    Column("publication_dt", DateTime),
     Column("url", String),
-    Column("video_path", String),
+    Column("publication_dt", DateTime),
+    Column("path", String),
     Column("thumbnail_url", String),
     Column("thumbnail_path", String),
+    Column("Downloaded", Boolean),
+    Column("Downloading", Boolean),
 )

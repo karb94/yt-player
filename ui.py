@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import datetime
 from subprocess import Popen
 from threading import Thread
@@ -50,6 +51,7 @@ class VideoCard(Gtk.ListBoxRow):
     def __init__(self, video, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.video = video
+
         grid = Gtk.Grid()
         grid.props.width_request = 300
         self.set_child(grid)
@@ -139,15 +141,19 @@ class MainWindow(Gtk.ApplicationWindow):
             case Gdk.KEY_k:
                 self.list_box.child_focus(Gtk.DirectionType.TAB_BACKWARD)
             case Gdk.KEY_d:
-                progress_bar = self.list_box.get_focus_child().progress_bar
+                video_card = self.list_box.get_focus_child()
                 def progress_hook(download: dict):
                     progress = parse_progress(download)
-                    GLib.idle_add(progress_bar.set_fraction, progress)
+                    GLib.idle_add(video_card.progress_bar.set_fraction, progress)
                 id = self.list_box.get_focus_child().video.id
+                def download_video(id: str, progress_hook: Callable):
+                    video_card.downloading = True
+                    self.backend.download_video(id=id, progress_hooks=[progress_hook])
+                    video_card.downloading = False
+                    video_card.downloaded = True
                 thread = Thread(
-                    target=self.backend.download_video,
-                    args=(id,),
-                    kwargs=dict(progress_hooks=[progress_hook])
+                    target=download_video,
+                    kwargs=dict(id=id, progress_hook=progress_hook)
                 )
                 thread.start()
             case Gdk.KEY_p:

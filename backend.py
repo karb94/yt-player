@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from os.path import isfile
 from pathlib import Path
@@ -6,7 +7,7 @@ import re
 
 import feedparser
 import pandas as pd
-from typing import Sequence
+from typing import Any, Sequence
 from sqlalchemy import insert, select, update, bindparam, Row
 from sqlalchemy.engine.base import Engine
 from db import metadata, channel_table, video_table
@@ -77,6 +78,22 @@ class Backend:
 
         self.add_new_feeds(FEEDS)
         self.update_all_channels()
+
+    def get_field(self, id: str, field: str):
+        with self.engine.begin() as conn:
+            query_result = conn.execute(
+                select(video_table.c[field])
+                .filter_by(id=id)
+            )
+            return query_result.scalar_one_or_none()
+
+    def update_fields(self, id: str, **kwargs):
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(video_table)
+                .filter_by(id=id)
+                .values(**kwargs)
+            )
 
     def add_new_feeds(self, feeds: list[str]) -> None:
         channel_ids = set(map(extract_channel_id, feeds))
@@ -232,16 +249,38 @@ class Backend:
                 .values(video_path=video_path)
             )
 
-    def get_video_path(self, id):
+    def create_video(self, id: str) -> Video:
         with self.engine.begin() as conn:
             query_result = conn.execute(
-                select(video_table.c.video_path)
+                select(video_table.c.url)
                 .filter_by(id=id)
             )
-            path = query_result.scalar_one_or_none()
-        if path is None:
-            raise ValueError(f"No path exists for video with id {id}")
-        if not Path(path).is_file():
-            raise ValueError(f"No video in path {path} exists")
-        return path
+            result = query_result.one_or_none()
+        if result is None:
+            raise ValueError(f"Video with id {id} does not exists in the database")
+        return Video(backend=self, result._mapping)
+
+
+@dataclass
+class Video:
+    backend: Backend
+    id: str
+    url: str
+    publication_dt: datetime
+    title: str
+    thumbnail_url: str
+    thumbnail_path: str
+    channel_id: str
+    channel_title: str
+    downloaded: str
+    downloading: str
+
+    @property
+    def path(self) -> str | None:
+        return self.backend.get_field(self.id, "path")
+
+    def download(self, **kwargs):
+        self.backend.update_fields(self.id, downloading=True)
+        self.backend.download_video(self.id, **kwargs)
+        self.backend.update_fields(self.id, downloading=False, downloaded=True)
 
