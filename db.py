@@ -20,6 +20,6 @@ video_table = Table(
     Column("path", String),
     Column("thumbnail_url", String),
     Column("thumbnail_path", String),
-    Column("downloaded", Boolean, default=False),
     Column("downloading", Boolean, default=False),
+    Column("read", Boolean, default=False),
 )

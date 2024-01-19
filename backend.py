@@ -1,23 +1,22 @@
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from os.path import isfile
 from pathlib import Path
 import re
 
 import feedparser
 import pandas as pd
-from typing import Any, Sequence
-from sqlalchemy import insert, select, update, bindparam, Row
+from sqlalchemy import Row, bindparam, delete, insert, select, update
 from sqlalchemy.engine.base import Engine
-from db import metadata, channel_table, video_table
-from download import download_thumbnail, download_video
-from IPython.core.debugger import set_trace
-from threading import Thread
-from yt_dlp import YoutubeDL
-from urllib.request import urlretrieve
+
+from db import channel_table, video_table, metadata
+from download import download_thumbnail, parse_progress
+
+import gi
+gi.require_version("Notify", "0.7")
+from gi.repository import GLib, Notify
 from pprint import pp
-from collections.abc import Callable
+
 
 
 VIDEO_ATTRIBUTES = [
@@ -27,14 +26,6 @@ VIDEO_ATTRIBUTES = [
     "media_thumbnail",
     "published",
 ]
-FORMATS_RANKING = (
-    "bestvideo[width=2560][vcodec=vp09.00.50.08][ext=mp4]+bestaudio",
-    "bestvideo[width=2560][vcodec=vp9][ext=mp4]+bestaudio",
-    "bestvideo[width=2560][vcodec=vp09.00.50.08]+bestaudio",
-    "bestvideo[width=2560]+bestaudio",
-    "bestvideo[width<=2560]+bestaudio",
-    "best",
-)
 FEED_PREFIX = "https://www.youtube.com/feeds/videos.xml?channel_id="
 channel_id_regex = re.compile(re.escape(FEED_PREFIX) + r"([\w-]{24})")
 FEEDS = [
@@ -51,30 +42,19 @@ def extract_channel_id(feed: str) -> str:
         return match.group(1)
 
 
-get_thumbnail_url = "http://img.youtube.com/vi/{video_id}/mqdefault.jpg".format
-
-
-def download_thumbnail(video_id: str, dir: str) -> str:
-    thumbnail_dir = Path(dir)
-    thumbnail_dir.mkdir(parents=True, exist_ok=True)
-    url = get_thumbnail_url(video_id=video_id)
-    ext = Path(url).suffix
-    filename = video_id + ext
-    thumbnail_path = thumbnail_dir / filename
-    urlretrieve(url, thumbnail_path)
-    return str(thumbnail_path)
-
 
 class Backend:
     def __init__(self, engine: Engine, thumbnail_dir: str, video_dir: str) -> None:
         self.engine = engine
-        self.thumbnail_dir = thumbnail_dir
-        Path(self.thumbnail_dir).mkdir(parents=True, exist_ok=True)
-        self.video_dir = video_dir
-        Path(self.video_dir).mkdir(parents=True, exist_ok=True)
+        thumbnail_dir_path = Path(thumbnail_dir)
+        thumbnail_dir_path.mkdir(parents=True, exist_ok=True)
+        self.thumbnail_dir = str(thumbnail_dir_path.absolute())
+        video_dir_path = Path(video_dir)
+        video_dir_path.mkdir(parents=True, exist_ok=True)
+        self.video_dir = str(video_dir_path.absolute())
 
-        metadata.drop_all(self.engine)
-        metadata.create_all(self.engine)
+        # metadata.drop_all(self.engine)
+        # metadata.create_all(self.engine)
 
         self.add_new_feeds(FEEDS)
         self.update_all_channels()
@@ -101,8 +81,9 @@ class Backend:
             query_result = conn.execute(select(channel_table.c.id))
             db_channel_ids = set(query_result.scalars().all())
             missing_channel_ids = channel_ids - db_channel_ids
-            values = [dict(id=channel_id) for channel_id in missing_channel_ids]
-            conn.execute(insert(channel_table), values)
+            if missing_channel_ids:
+                values = [dict(id=channel_id) for channel_id in missing_channel_ids]
+                conn.execute(insert(channel_table), values)
 
     def download_feeds(self) -> Iterator:
         with self.engine.begin() as conn:
@@ -115,8 +96,8 @@ class Backend:
         channel_id = extract_channel_id(parsed_feed.href)
         with self.engine.begin() as conn:
             query_result = conn.execute(
-                select(channel_table.c.id)
-                .filter_by(id=channel_id)
+                select(video_table.c.id)
+                .filter_by(channel_id=channel_id)
             )
             db_video_ids = set(query_result.scalars())
 
@@ -198,10 +179,10 @@ class Backend:
     def download_thumbnails(self) -> None:
         with self.engine.begin() as conn:
             query_result = conn.execute(
-                select(video_table.c["id", "thumbnail_url"])
+                select(video_table.c.id)
                 .where(video_table.c.thumbnail_path.is_(None))
             )
-            for video_id, thumbnail_url in query_result:
+            for video_id in query_result.scalars():
                 thumbnail_path = download_thumbnail(video_id, self.thumbnail_dir)
                 conn.execute(
                     update(video_table)
@@ -217,6 +198,8 @@ class Backend:
                 raise ConnectionError(f"feedparser exited with status {parsed_feed['status']}")
             self.update_channel(parsed_feed)
         self.download_thumbnails()
+        self.validate_paths(dir_str=self.thumbnail_dir, path_col="thumbnail_path")
+        self.validate_paths(dir_str=self.video_dir, path_col="path")
 
     def query_videos(self) -> Sequence[Row]:
         with self.engine.begin() as conn:
@@ -236,14 +219,31 @@ class Backend:
         return query_result.scalars().all()
 
     def download_video(self, id: str, **kwargs):
-        with self.engine.begin() as conn:
-            query_result = conn.execute(
-                select(video_table.c.url)
-                .filter_by(id=id)
-            )
-            url = query_result.scalar_one_or_none()
+        url = self.get_field(id=id, field="url")
         if url is None:
             raise ValueError(f"No video with id {id} exists")
+
+        thumbnail_path = self.get_field(id=id, field="thumbnail_path")
+        Notify.init()
+        title = self.get_field(id=id, field="title")
+        summary = f"Preparing download"
+        notification = Notify.Notification.new(summary, title, thumbnail_path)
+        notification.set_timeout(Notify.EXPIRES_NEVER)
+        notification.set_app_name("yt-player")
+        notification.show()
+
+        def notification_hook(d):
+            progress_frac = parse_progress(d)
+            if isinstance(progress_frac, float):
+                value = GLib.Variant.new_uint32(int(progress_frac*100))
+                notification.set_hint("value", value)
+                tag = GLib.Variant.new_string(id)
+                notification.set_hint("x-dunst-stack-tag", tag)
+                # fgcolor = GLib.Variant.new_string("#ff4444")
+                # notification.set_hint("fgcolor", fgcolor)
+                notification.show()
+
+
         ext = "mkv"
         video_path = f"{self.video_dir}/{id}.{ext}"
         options = {
@@ -253,8 +253,10 @@ class Backend:
             "noprogress": True,
         }
         options.update(kwargs)
+        options["progress_hooks"] = options["progress_hooks"] + [notification_hook]
         with YoutubeDL(options) as ydl:
             error_code = ydl.download(url)
+        notification.close()
         if error_code != 0:
             raise ConnectionError(f"Download of video with id {id} failed")
         if not Path(video_path).is_file():
@@ -267,16 +269,17 @@ class Backend:
             )
 
     def create_video(self, id: str) -> "Video":
-        dynamic_fields = (
-            "path",
-            "thumbnail_path",
-            "downloading",
-            "downloaded",
+        video_columns = (
+            "id",
+            "url",
+            "publication_dt",
+            "title",
+            "thumbnail_url",
+            "channel_id",
         )
-        video_columns = [col for col in video_table.c if col.name not in dynamic_fields]
         with self.engine.begin() as conn:
             query_result = conn.execute(
-                select(*video_columns, channel_table.c.title.label("channel_title"))
+                select(video_table.c[video_columns], channel_table.c.title.label("channel_title"))
                 .join(channel_table)
                 .where(video_table.c.id == id)
             )
@@ -284,6 +287,19 @@ class Backend:
         if result is None:
             raise ValueError(f"Video with id {id} does not exists in the database")
         return Video(backend=self, **result._mapping)
+
+    def delete_video(self, id: str) -> None:
+        video_path = self.get_field(id, "path")
+        if video_path is not None:
+            Path(video_path).unlink(missing_ok=True)
+        thumbnail_path = self.get_field(id, "thumbnail_path")
+        if thumbnail_path is not None:
+            Path(thumbnail_path).unlink(missing_ok=True)
+        with self.engine.begin() as conn:
+            conn.execute(
+                delete(video_table)
+                .filter_by(id=id)
+            )
 
 
 @dataclass
@@ -306,15 +322,24 @@ class Video:
         return self.backend.get_field(self.id, "thumbnail_path")
 
     @property
-    def downloaded(self) -> str | None:
+    def downloaded(self) -> bool:
+        if self.path is None:
+            return False
+        return Path(self.path).is_file()
+
+    @property
+    def downloading(self) -> bool | None:
         return self.backend.get_field(self.id, "downloaded")
 
     @property
-    def downloading(self) -> str | None:
-        return self.backend.get_field(self.id, "downloaded")
+    def read(self) -> bool | None:
+        return self.backend.get_field(self.id, "read")
 
-    def download(self, **kwargs):
-        self.backend.update_fields(self.id, downloading=True, downloaded=False)
+    def download(self, **kwargs) -> None:
+        self.backend.update_fields(self.id, downloading=True)
         self.backend.download_video(self.id, **kwargs)
-        self.backend.update_fields(self.id, downloading=False, downloaded=True)
+        self.backend.update_fields(self.id, downloading=False)
+
+    def delete(self) -> None:
+        self.backend.delete_video(self.id)
 

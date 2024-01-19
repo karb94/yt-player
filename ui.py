@@ -3,48 +3,21 @@ from datetime import datetime
 from subprocess import Popen
 from threading import Thread
 from dateutil.relativedelta import relativedelta
+from pprint import pp
 
+from backend import parse_progress
 from IPython.core.debugger import set_trace
 from backend import Backend
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Gdk, Adw, GLib
+gi.require_version("Notify", "0.7")
+from gi.repository import Gtk, Gdk, Adw, GLib, Notify
 
 
 css_provider = Gtk.CssProvider()
 css_provider.load_from_path('style.css')
 Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-
-
-def parse_progress(download: dict):
-    # print(progress["status"])
-    del download["info_dict"]
-    # if progress["status"] == "
-    if "fragment_count" in download and "fragment_index" in download:
-        if download["fragment_index"] > download["fragment_count"]+1:
-            pp(download)
-            raise KeyError(f"No keys to calculate errors. Keys available {pp(list(download))}")
-        else:
-            progress = download["fragment_index"] / (download["fragment_count"]+1)
-    elif all(k in download for k in ("downloaded_bytes", "total_bytes")):
-        progress = download["downloaded_bytes"] / download["total_bytes"]
-    elif all(k in download for k in ("downloaded_bytes", "total_bytes_estimate")):
-        progress = download["downloaded_bytes"] / download["total_bytesestimate"]
-    elif "fragment_count" in download and "fragment_index" in download:
-        if download["fragment_index"] > download["fragment_count"]:
-            pp(download)
-            raise KeyError(f"No keys to calculate errors. Keys available {pp(list(download))}")
-        else:
-            progress = download["fragment_index"] / (download["fragment_count"]+1)
-    else:
-        return 'NO PROGRESS'
-
-    # progress = download["downloaded_bytes"] / download["total_bytes"]
-    # eta = download["eta"]
-    # speed = download["speed"]
-    # elapsed = download["elapsed"]
-    return progress
 
 
 class VideoCard(Gtk.ListBoxRow):
@@ -98,6 +71,7 @@ class VideoCard(Gtk.ListBoxRow):
         self.progress_bar = Gtk.ProgressBar(
             hexpand=True,
             show_text=True,
+            fraction=1 if video.downloaded else 0,
             # margin_start=10,
             # margin_end=30,
         )
@@ -154,13 +128,27 @@ class MainWindow(Gtk.ApplicationWindow):
                 thread.start()
             case Gdk.KEY_p:
                 video = self.list_box.get_focus_child().video
-                Popen(('mpv', video.path))
+                if not video.downloaded:
+                    return
+                cmd = (
+                    "mpv",
+                    "--keepaspect-window",
+                    "--geometry=70%",
+                    "--no-terminal",
+                    "--cursor-autohide=no",
+                    video.path,
+                )
+                Popen(cmd)
+            case Gdk.KEY_q:
+                self.close()
 
 
 class MyApp(Adw.Application):
     def __init__(self, backend: Backend, **kwargs):
+        print('main window')
         self.backend = backend
         super().__init__(**kwargs)
+        print('main window')
         self.connect('activate', self.on_activate)
 
     def on_activate(self, app):

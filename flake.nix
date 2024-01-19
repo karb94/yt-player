@@ -27,6 +27,7 @@
           gobject-introspection
           gtk4
           libadwaita
+          libnotify
           myPython
           sqlite-utils
         ];
