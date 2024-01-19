@@ -152,39 +152,47 @@ class Backend:
             )
         self.add_new_videos(parsed_feed)
 
-    def validate_thumbnail_paths(self) -> None:
-        thumbnail_dir = Path(self.thumbnail_dir)
-        if not thumbnail_dir.exists() or not thumbnail_dir.is_dir():
+    def validate_paths(self, dir_str: str, path_col: str) -> None:
+        dir = Path(dir_str)
+        if not dir.exists() or not dir.is_dir():
             raise FileNotFoundError(
-                f"Thumbnails directory '{thumbnail_dir}' is not a directory or doesn't exists"
+                f"Directory '{dir}' is not a directory or doesn't exists"
             )
-        thumbnails = set(thumbnail_dir.iterdir())
+        files = set(dir.iterdir())
         with self.engine.begin() as conn:
             query_result = conn.execute(
-                select(video_table.c["thumbnail_path"])
-                .where(video_table.c.thumbnail_path.is_not(None))
+                select(video_table.c[path_col])
+                .where(video_table.c[path_col].is_not(None))
             )
             db_paths = set(Path(path) for path in query_result.scalars())
-            existing_thumbnails = thumbnails - db_paths
-            if existing_thumbnails:
+            db_ids = set(conn.execute(select(video_table.c.id)).scalars())
+
+            existing_files = files - db_paths
+            files_in_db = [path for path in existing_files if path.stem in db_ids]
+            if files_in_db:
                 update_stmt = (
                     update(video_table)
                     .filter_by(id=bindparam("video_id"))
-                    .values(thumbnail_path=bindparam("thumbnail_path"))
+                    .values(**{path_col: bindparam(path_col)})
                 )
                 values = [
-                    dict(video_id=path.stem, thumbnail_path=str(path))
-                    for path in existing_thumbnails
+                    {"video_id": path.stem, path_col: str(path)}
+                    for path in existing_files
                 ]
                 conn.execute(update_stmt, values)
-            missing_thumbnails = db_paths - thumbnails
-            if missing_thumbnails:
+
+            for path in existing_files:
+                if path.stem not in db_ids:
+                    path.unlink()
+
+            missing_files = db_paths - files
+            if missing_files:
                 update_stmt = (
                     update(video_table)
                     .filter_by(id=bindparam("video_id"))
-                    .values(thumbnail_path=None)
+                    .values(**{path_col: None})
                 )
-                values = [dict(video_id=path.stem) for path in missing_thumbnails]
+                values = [dict(video_id=path.stem) for path in missing_files]
                 conn.execute(update_stmt, values)
 
     def download_thumbnails(self) -> None:
@@ -202,7 +210,8 @@ class Backend:
                 )
 
     def update_all_channels(self) -> None:
-        self.validate_thumbnail_paths()
+        self.validate_paths(dir_str=self.thumbnail_dir, path_col="thumbnail_path")
+        self.validate_paths(dir_str=self.video_dir, path_col="path")
         for parsed_feed in self.download_feeds():
             if parsed_feed["status"] != 200:
                 raise ConnectionError(f"feedparser exited with status {parsed_feed['status']}")
@@ -217,6 +226,14 @@ class Backend:
                 .order_by(video_table.c.publication_dt.desc())
             )
         return query_result.all()
+
+    def query_video_ids(self) -> Sequence[str]:
+        with self.engine.begin() as conn:
+            query_result = conn.execute(
+                select(video_table.c.id)
+                .order_by(video_table.c.publication_dt.desc())
+            )
+        return query_result.scalars().all()
 
     def download_video(self, id: str, **kwargs):
         with self.engine.begin() as conn:
@@ -246,19 +263,27 @@ class Backend:
             conn.execute(
                 update(video_table)
                 .filter_by(id=id)
-                .values(video_path=video_path)
+                .values(path=video_path)
             )
 
-    def create_video(self, id: str) -> Video:
+    def create_video(self, id: str) -> "Video":
+        dynamic_fields = (
+            "path",
+            "thumbnail_path",
+            "downloading",
+            "downloaded",
+        )
+        video_columns = [col for col in video_table.c if col.name not in dynamic_fields]
         with self.engine.begin() as conn:
             query_result = conn.execute(
-                select(video_table.c.url)
-                .filter_by(id=id)
+                select(*video_columns, channel_table.c.title.label("channel_title"))
+                .join(channel_table)
+                .where(video_table.c.id == id)
             )
             result = query_result.one_or_none()
         if result is None:
             raise ValueError(f"Video with id {id} does not exists in the database")
-        return Video(backend=self, result._mapping)
+        return Video(backend=self, **result._mapping)
 
 
 @dataclass
@@ -269,18 +294,27 @@ class Video:
     publication_dt: datetime
     title: str
     thumbnail_url: str
-    thumbnail_path: str
     channel_id: str
     channel_title: str
-    downloaded: str
-    downloading: str
 
     @property
     def path(self) -> str | None:
         return self.backend.get_field(self.id, "path")
 
+    @property
+    def thumbnail_path(self) -> str | None:
+        return self.backend.get_field(self.id, "thumbnail_path")
+
+    @property
+    def downloaded(self) -> str | None:
+        return self.backend.get_field(self.id, "downloaded")
+
+    @property
+    def downloading(self) -> str | None:
+        return self.backend.get_field(self.id, "downloaded")
+
     def download(self, **kwargs):
-        self.backend.update_fields(self.id, downloading=True)
+        self.backend.update_fields(self.id, downloading=True, downloaded=False)
         self.backend.download_video(self.id, **kwargs)
         self.backend.update_fields(self.id, downloading=False, downloaded=True)
 

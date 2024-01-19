@@ -59,7 +59,7 @@ class VideoCard(Gtk.ListBoxRow):
         img = Gtk.Picture.new_for_filename(video.thumbnail_path)
         img.props.halign = Gtk.Align.START
         img.props.can_shrink = False
-        grid.attach(child=img, column=1, row=1, width=1, height=3) 
+        grid.attach(child=img, column=1, row=1, width=1, height=4) 
         title_label = Gtk.Label(
             label=f'<span weight="bold" size="x-large">{video.title}</span>',
             use_markup=True,
@@ -120,9 +120,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.scrolled_window = Gtk.ScrolledWindow()
         self.set_child(self.scrolled_window)
-        videos = self.backend.query_videos()
         self.list_box = Gtk.ListBox()
-        for video in videos:
+        video_ids = self.backend.query_video_ids()
+        for video_id in video_ids:
+            video = self.backend.create_video(video_id)
             self.list_box.append(VideoCard(video))
         # self.scrolled_window.set_child(self.list_box)
         self.box.append(self.list_box)
@@ -145,21 +146,15 @@ class MainWindow(Gtk.ApplicationWindow):
                 def progress_hook(download: dict):
                     progress = parse_progress(download)
                     GLib.idle_add(video_card.progress_bar.set_fraction, progress)
-                id = self.list_box.get_focus_child().video.id
-                def download_video(id: str, progress_hook: Callable):
-                    video_card.downloading = True
-                    self.backend.download_video(id=id, progress_hooks=[progress_hook])
-                    video_card.downloading = False
-                    video_card.downloaded = True
+                video = self.list_box.get_focus_child().video
                 thread = Thread(
-                    target=download_video,
-                    kwargs=dict(id=id, progress_hook=progress_hook)
+                    target=video.download,
+                    kwargs=dict(progress_hooks=[progress_hook])
                 )
                 thread.start()
             case Gdk.KEY_p:
-                id = self.list_box.get_focus_child().video.id
-                video_path = self.backend.get_video_path(id)
-                Popen(('mpv', video_path))
+                video = self.list_box.get_focus_child().video
+                Popen(('mpv', video.path))
 
 
 class MyApp(Adw.Application):
