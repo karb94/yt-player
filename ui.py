@@ -1,34 +1,35 @@
-from collections.abc import Callable
 from datetime import datetime
 from subprocess import Popen
 from threading import Thread
 from dateutil.relativedelta import relativedelta
-from pprint import pp
 
-from backend import parse_progress
-from IPython.core.debugger import set_trace
-from backend import Backend
+from download import parse_progress
+from backend import Backend, Video
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 gi.require_version("Notify", "0.7")
-from gi.repository import Gtk, Gdk, Adw, GLib, Notify
+from gi.repository import Gtk, Gdk, Adw, GLib # type: ignore[attr-define]
 
 
 css_provider = Gtk.CssProvider()
 css_provider.load_from_path('style.css')
-Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+display = Gdk.Display.get_default()
+if display is None:
+    raise TypeError
+Gtk.StyleContext.add_provider_for_display(display, css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
 
 class VideoCard(Gtk.ListBoxRow):
-    def __init__(self, video, *args, **kwargs):
+    def __init__(self, video: Video, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.video = video
 
         grid = Gtk.Grid()
         grid.props.width_request = 300
         self.set_child(grid)
-        # img = Gtk.Picture(file=img_path, vexpand=True, hexpand=True)
+        if not self.video.thumbnail_downloaded:
+            self.video.download_thumbnail()
         img = Gtk.Picture.new_for_filename(video.thumbnail_path)
         img.props.halign = Gtk.Align.START
         img.props.can_shrink = False
@@ -76,6 +77,8 @@ class VideoCard(Gtk.ListBoxRow):
             # margin_end=30,
         )
         self.progress_bar_label = self.progress_bar.get_first_child()
+        if self.progress_bar_label is None:
+            return
         self.progress_bar_label.props.halign = Gtk.Align.START
         self.progress_bar_label.props.margin_start = 10
         grid.attach(child=self.progress_bar, column=2, row=4, width=1, height=1) 
@@ -117,13 +120,15 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.list_box.child_focus(Gtk.DirectionType.TAB_BACKWARD)
             case Gdk.KEY_d:
                 video_card = self.list_box.get_focus_child()
+                if video_card.video.downloaded:
+                    return
                 def progress_hook(download: dict):
                     progress = parse_progress(download)
                     GLib.idle_add(video_card.progress_bar.set_fraction, progress)
                 video = self.list_box.get_focus_child().video
                 thread = Thread(
                     target=video.download,
-                    kwargs=dict(progress_hooks=[progress_hook])
+                    kwargs=dict(with_notification=True, progress_hooks=[progress_hook])
                 )
                 thread.start()
             case Gdk.KEY_p:
@@ -145,10 +150,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
 class MyApp(Adw.Application):
     def __init__(self, backend: Backend, **kwargs):
-        print('main window')
         self.backend = backend
         super().__init__(**kwargs)
-        print('main window')
         self.connect('activate', self.on_activate)
 
     def on_activate(self, app):

@@ -12,11 +12,14 @@
         with ps; [
           feedparser
           ipython
+          mypy
           pandas
+          # pandas-stubs
           pygobject-stubs
           pygobject3
           sqlalchemy
           sqlite-utils
+          types-python-dateutil
           yt-dlp
         ];
       myPython = pkgs.python3.withPackages pythonPkgs;

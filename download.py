@@ -2,8 +2,14 @@ from pathlib import Path
 from yt_dlp import YoutubeDL
 from urllib.request import urlretrieve
 from pprint import pp
+from collections.abc import Callable
+
+import gi
+gi.require_version("Notify", "0.7")
+from gi.repository import GLib, Notify # type: ignore[attr-defined]
 
 get_thumbnail_url = "http://img.youtube.com/vi/{video_id}/mqdefault.jpg".format
+get_video_url = "http://www.youtube.com/watch?v={video_id}".format
 
 FORMATS_RANKING = (
     "bestvideo[width=2560][vcodec=vp09.00.50.08][ext=mp4]+bestaudio",
@@ -20,15 +26,14 @@ default_options = {
     "noprogress": True,
 }
 
-def download_thumbnail(video_id: str, dir: str) -> str:
-    thumbnail_dir = Path(dir)
-    thumbnail_dir.mkdir(parents=True, exist_ok=True)
+def download_thumbnail(video_id: str, path: str) -> None:
+    p = Path(path)
+    if not p.parent.is_dir():
+        raise FileNotFoundError(f"Directory {p.parent} does not exist or is not a directory")
+    if p.exists():
+        raise FileExistsError(f"File {p} already exists")
     url = get_thumbnail_url(video_id=video_id)
-    ext = Path(url).suffix
-    filename = video_id + ext
-    thumbnail_path = thumbnail_dir / filename
-    urlretrieve(url, thumbnail_path)
-    return str(thumbnail_path)
+    urlretrieve(url, path)
 
 
 def parse_progress(download: dict):
@@ -39,7 +44,7 @@ def parse_progress(download: dict):
     if "fragment_count" in download and "fragment_index" in download:
         if download["fragment_index"] > download["fragment_count"]+1:
             pp(download)
-            raise KeyError(f"No keys to calculate errors. Keys available {pp(list(download))}")
+            raise KeyError(f"No keys to calculate errors. Keys available {download.keys()}")
         else:
             progress = download["fragment_index"] / (download["fragment_count"]+1)
     elif all(k in download for k in ("downloaded_bytes", "total_bytes")):
@@ -49,7 +54,7 @@ def parse_progress(download: dict):
     elif "fragment_count" in download and "fragment_index" in download:
         if download["fragment_index"] > download["fragment_count"]:
             pp(download)
-            raise KeyError(f"No keys to calculate errors. Keys available {pp(list(download))}")
+            raise KeyError(f"No keys to calculate errors. Keys available {download.keys()}")
         else:
             progress = download["fragment_index"] / (download["fragment_count"]+1)
     else:
@@ -61,48 +66,46 @@ def parse_progress(download: dict):
     return progress
 
 
-def download_video(url: str, dir: str, filename: str, with_notification: bool, **ytdlp_kwargs):
-
-    thumbnail_path = self.get_field(id=id, field="thumbnail_path")
-    Notify.init()
-    title = self.get_field(id=id, field="title")
-    summary = f"Preparing download"
-    notification = Notify.Notification.new(summary, title, thumbnail_path)
-    notification.set_timeout(Notify.EXPIRES_NEVER)
-    notification.set_app_name("yt-player")
-    notification.show()
-
+def get_notification_hook(notification: Notify.Notification) -> Callable:
     def notification_hook(d):
         progress_frac = parse_progress(d)
         if isinstance(progress_frac, float):
             value = GLib.Variant.new_uint32(int(progress_frac*100))
             notification.set_hint("value", value)
-            tag = GLib.Variant.new_string(id)
-            notification.set_hint("x-dunst-stack-tag", tag)
             # fgcolor = GLib.Variant.new_string("#ff4444")
             # notification.set_hint("fgcolor", fgcolor)
             notification.show()
+    return notification_hook
 
 
-    video_path = f"{dir}/{id}.{ext}"
-    %(id)s].%(ext)s
-    ytdlp_kwargs["outtmpl"] = dict(default=video_path)
-    if with_notification:
+def download_video(
+    url: str,
+    path: str,
+    notification: Notify.Notification = None,
+    **ytdlp_kwargs
+):
+    # %(id)s].%(ext)s
+    p = Path(path)
+    if p.is_file():
+        raise FileExistsError
+    p.parent.mkdir(parents=True, exist_ok=True)
+    ytdlp_kwargs["outtmpl"] = dict(default=path)
+
+    if notification is not None:
+        notification.show()
+        notification_hook = get_notification_hook(notification)
         ytdlp_kwargs["progress_hooks"] = ytdlp_kwargs["progress_hooks"] + [notification_hook]
+
     with YoutubeDL(ytdlp_kwargs) as ydl:
         error_code = ydl.download(url)
 
-    notification.close()
+    if notification is not None:
+        notification.close()
+
     if error_code != 0:
         raise ConnectionError(f"Download of video with id {id} failed")
-    if not Path(video_path).is_file():
+    if not p.is_file():
         raise FileNotFoundError("Video was downloaded but file is not there")
-    with self.engine.begin() as conn:
-        conn.execute(
-            update(video_table)
-            .filter_by(id=id)
-            .values(path=video_path)
-        )
 
 
 # TODO: Notification as a decorator for the actual download bit
