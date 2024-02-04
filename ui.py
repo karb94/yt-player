@@ -2,6 +2,7 @@ from datetime import datetime
 from subprocess import Popen
 from threading import Thread
 from dateutil.relativedelta import relativedelta
+from typing import Any
 
 from download import parse_progress
 from backend import Backend, Video
@@ -9,7 +10,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 gi.require_version("Notify", "0.7")
-from gi.repository import Gtk, Gdk, Adw, GLib # type: ignore[attr-define]
+from gi.repository import Gtk, Gdk, Adw, GLib # type: ignore[attr-defined]
 
 
 css_provider = Gtk.CssProvider()
@@ -112,7 +113,7 @@ class MainWindow(Gtk.ApplicationWindow):
         evk.connect("key-pressed", self.key_press)
         self.add_controller(evk)
 
-    def key_press(self, event, keyval, keycode, state):
+    def key_press(self, event, keyval, keycode, state) -> None:
         match keyval:
             case Gdk.KEY_j:
                 self.list_box.child_focus(Gtk.DirectionType.TAB_FORWARD)
@@ -120,20 +121,26 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.list_box.child_focus(Gtk.DirectionType.TAB_BACKWARD)
             case Gdk.KEY_d:
                 video_card = self.list_box.get_focus_child()
+                if video_card is None or not isinstance(video_card, VideoCard):
+                    return
                 if video_card.video.downloaded:
                     return
-                def progress_hook(download: dict):
+                if not isinstance(video_card, VideoCard):
+                    return
+                f = video_card.progress_bar.set_fraction
+                def progress_hook(download: dict[str, Any]):
                     progress = parse_progress(download)
-                    GLib.idle_add(video_card.progress_bar.set_fraction, progress)
-                video = self.list_box.get_focus_child().video
+                    GLib.idle_add(f, progress)
                 thread = Thread(
-                    target=video.download,
+                    target=video_card.video.download,
                     kwargs=dict(with_notification=True, progress_hooks=[progress_hook])
                 )
                 thread.start()
             case Gdk.KEY_p:
-                video = self.list_box.get_focus_child().video
-                if not video.downloaded:
+                video_card = self.list_box.get_focus_child()
+                if video_card is None or not isinstance(video_card, VideoCard):
+                    return
+                if not video_card.video.downloaded:
                     return
                 cmd = (
                     "mpv",
@@ -141,7 +148,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     "--geometry=70%",
                     "--no-terminal",
                     "--cursor-autohide=no",
-                    video.path,
+                    video_card.video.path,
                 )
                 Popen(cmd)
             case Gdk.KEY_q:

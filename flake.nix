@@ -10,6 +10,7 @@
       pkgs = nixpkgs.legacyPackages.${system};
       pythonPkgs = ps:
         with ps; [
+          beautifulsoup4
           feedparser
           ipython
           mypy
@@ -17,6 +18,8 @@
           # pandas-stubs
           pygobject-stubs
           pygobject3
+          pyxdg
+          requests
           sqlalchemy
           sqlite-utils
           types-python-dateutil

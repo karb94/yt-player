@@ -3,6 +3,9 @@ from yt_dlp import YoutubeDL
 from urllib.request import urlretrieve
 from pprint import pp
 from collections.abc import Callable
+from typing import Any
+import requests
+from bs4 import BeautifulSoup
 
 import gi
 gi.require_version("Notify", "0.7")
@@ -36,7 +39,7 @@ def download_thumbnail(video_id: str, path: str) -> None:
     urlretrieve(url, path)
 
 
-def parse_progress(download: dict):
+def parse_progress(download: dict[str, Any]) -> float | None:
     # print(progress["status"])
     if "info_dict" in download:
         del download["info_dict"]
@@ -66,8 +69,8 @@ def parse_progress(download: dict):
     return progress
 
 
-def get_notification_hook(notification: Notify.Notification) -> Callable:
-    def notification_hook(d):
+def get_notification_hook(notification: Notify.Notification) -> Callable[[dict[str, Any]], None]:
+    def notification_hook(d: dict[str, Any]) -> None:
         progress_frac = parse_progress(d)
         if isinstance(progress_frac, float):
             value = GLib.Variant.new_uint32(int(progress_frac*100))
@@ -82,8 +85,8 @@ def download_video(
     url: str,
     path: str,
     notification: Notify.Notification = None,
-    **ytdlp_kwargs
-):
+    **ytdlp_kwargs: Any,
+) -> None:
     # %(id)s].%(ext)s
     p = Path(path)
     if p.is_file():
@@ -108,4 +111,10 @@ def download_video(
         raise FileNotFoundError("Video was downloaded but file is not there")
 
 
-# TODO: Notification as a decorator for the actual download bit
+def get_yt_channel_id(modern_url: str):
+    soup = BeautifulSoup(requests.get(modern_url).content, "html.parser")
+    try:
+        return soup.find("meta", {"itemprop": "channelId"})["content"]
+    except TypeError:
+        return "Seems like the link is not valid."
+
