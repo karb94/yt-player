@@ -3,9 +3,10 @@ from yt_dlp import YoutubeDL
 from urllib.request import urlretrieve
 from pprint import pp
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Optional
 import requests
 from bs4 import BeautifulSoup
+import re
 
 import gi
 gi.require_version("Notify", "0.7")
@@ -84,10 +85,9 @@ def get_notification_hook(notification: Notify.Notification) -> Callable[[dict[s
 def download_video(
     url: str,
     path: str,
-    notification: Notify.Notification = None,
+    notification: Optional[Notify.Notification] = None,
     **ytdlp_kwargs: Any,
 ) -> None:
-    # %(id)s].%(ext)s
     p = Path(path)
     if p.is_file():
         raise FileExistsError
@@ -111,10 +111,15 @@ def download_video(
         raise FileNotFoundError("Video was downloaded but file is not there")
 
 
-def get_yt_channel_id(modern_url: str):
-    soup = BeautifulSoup(requests.get(modern_url).content, "html.parser")
-    try:
-        return soup.find("meta", {"itemprop": "channelId"})["content"]
-    except TypeError:
-        return "Seems like the link is not valid."
+def get_yt_channel_id(modern_url: str) -> str:
+    content = requests.get(modern_url).content
+    soup = BeautifulSoup(content, "html.parser")
+    channel_id_regex = re.compile(r'"channelId":"([\w-]{24})"')
+    for script in soup.find_all("script"):
+        if script.string is None:
+            continue
+        match = channel_id_regex.search(script.string)
+        if match is not None:
+            return match.group(1)
+    raise ValueError(f"Could not find a channelId in URL {modern_url}")
 

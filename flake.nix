@@ -11,15 +11,17 @@
       pythonPkgs = ps:
         with ps; [
           beautifulsoup4
+          types-beautifulsoup4
           feedparser
           ipython
           mypy
           pandas
-          # pandas-stubs
+          pandas-stubs
           pygobject-stubs
           pygobject3
           pyxdg
           requests
+          types-requests
           sqlalchemy
           sqlite-utils
           types-python-dateutil

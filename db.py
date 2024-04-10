@@ -30,7 +30,7 @@ class VideoTable(Base):
     title: Mapped[str]
     publication_dt: Mapped[datetime]
     downloading: Mapped[bool] = mapped_column(default=False)
-    read: Mapped[bool] = mapped_column(default=False)
+    watched: Mapped[bool] = mapped_column(default=False)
     channel_id: Mapped[int] = mapped_column(
         ForeignKey("channel.id", ondelete="CASCADE", onupdate="CASCADE")
     )

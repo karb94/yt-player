@@ -22,7 +22,7 @@ Gtk.StyleContext.add_provider_for_display(display, css_provider, Gtk.STYLE_PROVI
 
 
 class VideoCard(Gtk.ListBoxRow):
-    def __init__(self, video: Video, *args, **kwargs):
+    def __init__(self, video: Video, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.video = video
 
@@ -35,8 +35,9 @@ class VideoCard(Gtk.ListBoxRow):
         img.props.halign = Gtk.Align.START
         img.props.can_shrink = False
         grid.attach(child=img, column=1, row=1, width=1, height=4) 
+        title = video.title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         title_label = Gtk.Label(
-            label=f'<span weight="bold" size="x-large">{video.title}</span>',
+            label=rf'<span weight="bold" size="x-large">{title}</span>',
             use_markup=True,
             halign=Gtk.Align.START,
             vexpand=True,
@@ -151,6 +152,13 @@ class MainWindow(Gtk.ApplicationWindow):
                     video_card.video.path,
                 )
                 Popen(cmd)
+            case Gdk.KEY_w:
+                video_card = self.list_box.get_focus_child()
+                if video_card is None or not isinstance(video_card, VideoCard):
+                    return
+                self.list_box.child_focus(Gtk.DirectionType.TAB_FORWARD)
+                video_card.video.watched = True
+                video_card.set_visible(False)
             case Gdk.KEY_q:
                 self.close()
 

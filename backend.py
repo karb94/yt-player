@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -6,9 +6,8 @@ from typing import Any
 import re
 
 import feedparser
-from feedparser.util import FeedParserDict # type: ignore [import]
 import pandas as pd
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.engine.base import Engine
 
@@ -95,7 +94,7 @@ class Backend:
                 publication_dt=lambda df: pd.to_datetime(df["publication_dt"]),
                 channel_id=channel_id,
                 downloading=False,
-                read=False,
+                watched=False,
             )
             .sort_values("publication_dt")
         )
@@ -233,7 +232,10 @@ class Video:
     @property
     def downloading(self) -> bool | None:
         with Session(self.backend.engine) as session:
-            return session.scalar(select(VideoTable.downloading).filter_by(id=id))
+            return session.scalar(
+                select(VideoTable.downloading)
+                .filter_by(id=id)
+            )
 
     @property
     def thumbnail_downloaded(self) -> bool:
@@ -244,9 +246,21 @@ class Video:
             download_thumbnail(self.id, self.thumbnail_path)
 
     @property
-    def read(self) -> bool | None:
+    def watched(self) -> bool | None:
         with Session(self.backend.engine) as session:
-            return session.scalar(select(VideoTable.read).filter_by(id=id))
+            return session.scalar(
+                select(VideoTable.watched)
+                .filter_by(id=id)
+            )
+
+    @watched.setter
+    def watched(self, value: bool) -> None:
+        with Session(self.backend.engine) as session:
+            session.execute(
+                update(VideoTable)
+                .filter_by(id=self.id)
+                .values(watched=value)
+            )
 
     def delete(self) -> None:
         self.backend.delete_video(self.id)
