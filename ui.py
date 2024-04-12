@@ -20,6 +20,17 @@ if display is None:
     raise TypeError
 Gtk.StyleContext.add_provider_for_display(display, css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
+def get_time_ago(date_time: datetime) -> str:
+    units = ("year", "month", "day", "hour", "minute")
+    time_delta = relativedelta(datetime.now(), date_time)
+    for unit in units:
+        value = getattr(time_delta, unit+"s")
+        if value == 0:
+            continue
+        s = "s" if value > 1 else ""
+        return f"{value} {unit}{s} ago"
+    return "1 min ago"
+
 
 class VideoCard(Gtk.ListBoxRow):
     def __init__(self, video: Video, *args: Any, **kwargs: Any):
@@ -51,21 +62,9 @@ class VideoCard(Gtk.ListBoxRow):
             margin_start=10,
         )
         grid.attach(child=channel_label, column=2, row=2, width=1, height=1) 
-        time_since_publication = relativedelta(datetime.now(), video.publication_dt)
-        if time_since_publication.days:
-            days = time_since_publication.days
-            s = "s" if days > 1 else ""
-            ago_str = f"{days} day{s} ago"
-        elif time_since_publication.hours:
-            hours = time_since_publication.hours
-            s = "s" if hours > 1 else ""
-            ago_str = f"{hours} hour{s} ago"
-        else:
-            minutes = time_since_publication.minutes
-            s = "s" if minutes != 1 else ""
-            ago_str = f"{minutes} minute{s} ago"
+        time_ago = get_time_ago(video.publication_dt)
         publication_label = Gtk.Label(
-            label=ago_str,
+            label=time_ago,
             halign=Gtk.Align.START,
             vexpand=True,
             margin_start=10,
