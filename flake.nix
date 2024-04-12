@@ -33,6 +33,7 @@
         buildInputs = with pkgs; [
           ffmpeg
           gobject-introspection
+          # gsettings-desktop-schemas
           gtk4
           libadwaita
           libnotify

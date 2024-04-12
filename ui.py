@@ -99,7 +99,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.scrolled_window = Gtk.ScrolledWindow()
         self.set_child(self.scrolled_window)
         self.list_box = Gtk.ListBox()
-        video_ids = self.backend.query_video_ids()
+        video_ids = self.backend.query_video_ids(watched=False)
         for video_id in video_ids:
             video = self.backend.create_video(video_id)
             self.list_box.append(VideoCard(video))

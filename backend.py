@@ -24,6 +24,8 @@ VIDEO_ATTRIBUTES = [
     "title",
     "published",
 ]
+VIDEO_FORMAT = "mkv"
+THUMBNAIL_FORMAT = "jpg"
 FEED_PREFIX = "https://www.youtube.com/feeds/videos.xml?channel_id="
 channel_id_regex = re.compile(re.escape(FEED_PREFIX) + r"([\w-]{24})")
 FEEDS = [
@@ -62,6 +64,8 @@ class Backend:
 
         feeds = map(FEED_PREFIX.__add__, channel_ids)
         self.fetch_feeds(feeds)
+        self.delete_orphan_channels()
+        self.clean_assets()
 
     def update_fields(self, id: str, **kwargs: Any) -> None:
         with self.engine.begin() as conn:
@@ -72,10 +76,10 @@ class Backend:
             )
 
     def get_thumbnail_path(self, id: str) -> str:
-        return str(Path(self.thumbnail_dir).absolute() / f"{id}.jpg")
+        return str(Path(self.thumbnail_dir).absolute() / f"{id}.{THUMBNAIL_FORMAT}")
 
     def get_video_path(self, id: str) -> str:
-        return str(Path(self.video_dir).absolute() / f"{id}.mkv")
+        return str(Path(self.video_dir).absolute() / f"{id}.{VIDEO_FORMAT}")
 
     def add_new_videos(self, parsed_feed: Any) -> None:
         channel_id = extract_channel_id(parsed_feed.href)
@@ -112,9 +116,13 @@ class Backend:
             session.add(channel)
             session.commit()
 
-    def download_thumbnails(self) -> None:
-        for video_id in self.query_video_ids():
-            download_thumbnail(video_id, self.thumbnail_dir)
+    def delete_orphan_channels(self) -> None:
+        """Delete channels from the database that are not included in `channel_ids`"""
+        with Session(self.engine) as session:
+            session.execute(
+                delete(ChannelTable)
+                .where(ChannelTable.id.not_in(self._channel_ids))
+            )
 
     def fetch_feeds(self, feed_urls: Iterable[str]) -> None:
         for parsed_feed in map(feedparser.parse, feed_urls):
@@ -123,26 +131,26 @@ class Backend:
             self.insert_channel(parsed_feed)
             self.add_new_videos(parsed_feed)
 
-    def purge_orphan_videos(self) -> None:
-        with Session(self.engine) as session:
-            session.delete(
-                select(ChannelTable)
-                .where(ChannelTable.id.not_in(self._channel_ids))
-            )
+    def clean_assets(self) -> None:
+        """Delete videos and thumbnails from videos that either don't exist in the database or have been watched"""
+        video_ids = tuple(self.query_video_ids(watched=False))
+        for video_path in Path(self.video_dir).iterdir():
+            if video_path.suffix != VIDEO_FORMAT:
+                video_path.unlink()
+            if video_path.stem not in video_ids:
+                video_path.unlink()
+        for thumbnail_path in Path(self.thumbnail_dir).iterdir():
+            if thumbnail_path.suffix != THUMBNAIL_FORMAT:
+                thumbnail_path.unlink()
+            if thumbnail_path.stem not in video_ids:
+                thumbnail_path.unlink()
 
-    def query_videos(self) -> Sequence[VideoTable]:
-        with Session(self.engine) as session:
-            query_result = session.scalars(
-                select(VideoTable)
-                .order_by(VideoTable.publication_dt.desc())
-            )
-        return query_result.all()
-
-    def query_video_ids(self) -> Sequence[str]:
+    def query_video_ids(self, **kwargs) -> Sequence[str]:
         with Session(self.engine) as session:
             query_result = session.scalars(
                 select(VideoTable.id)
                 .order_by(VideoTable.publication_dt.desc())
+                .filter_by(**kwargs)
             )
         return query_result.all()
 
@@ -150,7 +158,7 @@ class Backend:
         Notify.init()
         with Session(self.engine) as session:
             title = session.scalar(select(VideoTable.title).filter_by(id=id))
-        thumbnail_path = str(Path(self.thumbnail_dir).absolute() / f"{id}.jpg")
+        thumbnail_path = str(Path(self.thumbnail_dir).absolute() / f"{id}.{THUMBNAIL_FORMAT}")
         with Session(self.engine) as session:
             channel_title = session.scalar(
                 select(ChannelTable.title)
@@ -169,7 +177,7 @@ class Backend:
     def download_video(self, id: str, with_notification: bool, **ytdlp_kwargs: Any) -> None:
         self.update_fields(id, downloading=True)
         notification = self.create_notification(id) if with_notification else None
-        output_format = "mkv"
+        output_format = VIDEO_FORMAT
         filename = f"{id}.{output_format}"
         video_path = str(Path(self.video_dir) / filename)
         ytdlp_kwargs["merge_output_format"] = output_format
@@ -209,7 +217,10 @@ class Backend:
     def delete_video(self, id: str) -> None:
         self.delete_video_assets(id)
         with Session(self.engine) as session:
-            session.execute(delete(VideoTable).filter_by(id=id))
+            session.execute(
+                delete(VideoTable)
+                .filter_by(id=id)
+            )
 
 
 @dataclass
