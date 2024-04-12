@@ -12,7 +12,7 @@ data_path = Path(save_data_path("yrp"))
 thumbnail_dir = str(data_path / "thumbnails")
 video_dir = str(data_path / "videos")
 config_path = Path(save_config_path("yrp"))
-config_file = config_path /  "yrp.toml"
+config_file = config_path / "yrp.toml"
 with config_file.open("rb") as file:
     config = tomllib.load(file)
     channel_ids = config["channels"]

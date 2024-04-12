@@ -16,7 +16,7 @@ from download import download_thumbnail, download_video
 
 import gi
 gi.require_version("Notify", "0.7")
-from gi.repository import GLib, Notify # type: ignore[attr-defined]
+from gi.repository import GLib, Notify
 
 
 VIDEO_ATTRIBUTES = [
@@ -200,11 +200,14 @@ class Backend:
                 channel_title=video.channel.title,
             )
 
-    def delete_video(self, id: str) -> None:
+    def delete_video_assets(self, id: str) -> None:
         video_path = self.get_video_path(id)
         Path(video_path).unlink(missing_ok=True)
         thumbnail_path = self.get_thumbnail_path(id)
         Path(thumbnail_path).unlink(missing_ok=True)
+
+    def delete_video(self, id: str) -> None:
+        self.delete_video_assets(id)
         with Session(self.engine) as session:
             session.execute(delete(VideoTable).filter_by(id=id))
 
@@ -261,6 +264,10 @@ class Video:
                 .filter_by(id=self.id)
                 .values(watched=value)
             )
+            self.delete_assets()
+
+    def delete_assets(self) -> None:
+        self.backend.delete_video_assets(self.id)
 
     def delete(self) -> None:
         self.backend.delete_video(self.id)

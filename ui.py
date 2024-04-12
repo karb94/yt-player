@@ -10,7 +10,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 gi.require_version("Notify", "0.7")
-from gi.repository import Gtk, Gdk, Adw, GLib # type: ignore[attr-defined]
+from gi.repository import Gtk, Gdk, Adw, GLib
 
 
 css_provider = Gtk.CssProvider()
@@ -87,7 +87,7 @@ class VideoCard(Gtk.ListBoxRow):
 
 
 class MainWindow(Gtk.ApplicationWindow):
-    def __init__(self, backend: Backend, *args, **kwargs):
+    def __init__(self, backend: Backend, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.backend = backend
 
@@ -114,7 +114,14 @@ class MainWindow(Gtk.ApplicationWindow):
         evk.connect("key-pressed", self.key_press)
         self.add_controller(evk)
 
-    def key_press(self, event, keyval, keycode, state) -> None:
+    def key_press(
+        self,
+        _event: Gdk.Event,
+        keyval: int,
+        _keycode: int,
+        _state: Gdk.ModifierType,
+    ) -> None:
+        del _event, _keycode, _state
         match keyval:
             case Gdk.KEY_j:
                 self.list_box.child_focus(Gtk.DirectionType.TAB_FORWARD)
@@ -129,9 +136,11 @@ class MainWindow(Gtk.ApplicationWindow):
                 if not isinstance(video_card, VideoCard):
                     return
                 f = video_card.progress_bar.set_fraction
-                def progress_hook(download: dict[str, Any]):
+
+                def progress_hook(download: dict[str, Any]) -> None:
                     progress = parse_progress(download)
                     GLib.idle_add(f, progress)
+
                 thread = Thread(
                     target=video_card.video.download,
                     kwargs=dict(with_notification=True, progress_hooks=[progress_hook])
@@ -164,12 +173,12 @@ class MainWindow(Gtk.ApplicationWindow):
 
 
 class MyApp(Adw.Application):
-    def __init__(self, backend: Backend, **kwargs):
+    def __init__(self, backend: Backend, *args: Any, **kwargs: Any):
         self.backend = backend
-        super().__init__(**kwargs)
+        super().__init__(*args, **kwargs)
         self.connect('activate', self.on_activate)
 
-    def on_activate(self, app):
+    def on_activate(self, app: Adw.Application) -> None:
         self.win = MainWindow(backend=self.backend, application=app)
         self.win.present()
 

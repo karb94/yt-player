@@ -10,7 +10,7 @@ import re
 
 import gi
 gi.require_version("Notify", "0.7")
-from gi.repository import GLib, Notify # type: ignore[attr-defined]
+from gi.repository import GLib, Notify
 
 get_thumbnail_url = "http://img.youtube.com/vi/{video_id}/mqdefault.jpg".format
 get_video_url = "http://www.youtube.com/watch?v={video_id}".format
@@ -40,7 +40,7 @@ def download_thumbnail(video_id: str, path: str) -> None:
     urlretrieve(url, path)
 
 
-def parse_progress(download: dict[str, Any]) -> float | None:
+def parse_progress(download: dict[str, float]) -> float | None:
     # print(progress["status"])
     if "info_dict" in download:
         del download["info_dict"]
