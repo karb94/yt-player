@@ -145,7 +145,7 @@ class Backend:
             if thumbnail_path.stem not in video_ids:
                 thumbnail_path.unlink()
 
-    def query_video_ids(self, **kwargs) -> Sequence[str]:
+    def query_video_ids(self, **kwargs: Any) -> Sequence[str]:
         with Session(self.engine) as session:
             query_result = session.scalars(
                 select(VideoTable.id)
