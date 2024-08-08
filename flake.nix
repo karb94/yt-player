@@ -3,15 +3,17 @@
   nixConfig.bash-prompt-prefix = ''
 
     [nix develop]'';
-  inputs = { nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable"; };
-  outputs = { self, nixpkgs, ... }:
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+  };
+  outputs =
+    { self, nixpkgs, ... }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-      pythonPkgs = ps:
-        with ps; [
+      pythonPkgs =
+        ps: with ps; [
           beautifulsoup4
-          types-beautifulsoup4
           feedparser
           ipython
           mypy
@@ -19,27 +21,29 @@
           pandas-stubs
           pygobject-stubs
           pygobject3
+          pytest
+          pytest-bdd
           pyxdg
           requests
-          types-requests
           sqlalchemy
           sqlite-utils
+          types-beautifulsoup4
           types-python-dateutil
+          types-requests
           yt-dlp
         ];
       myPython = pkgs.python3.withPackages pythonPkgs;
-    in {
-      devShells.${system}.default = pkgs.mkShell {
-        buildInputs = with pkgs; [
-          ffmpeg
-          gobject-introspection
-          # gsettings-desktop-schemas
-          gtk4
-          libadwaita
-          libnotify
-          myPython
-          sqlite-utils
-        ];
-      };
+      external_pkgs = with pkgs; [
+        ffmpeg
+        gobject-introspection
+        # gsettings-desktop-schemas
+        gtk4
+        libadwaita
+        libnotify
+        sqlite-utils
+      ];
+    in
+    {
+      devShells.${system}.default = pkgs.mkShell { buildInputs = external_pkgs ++ [ myPython ]; };
     };
 }
