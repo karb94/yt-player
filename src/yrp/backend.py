@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Sequence, Collection
+from collections.abc import Set, Sequence, Collection
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -8,12 +8,12 @@ import logging
 
 import feedparser
 import pandas as pd
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, update, insert
 from sqlalchemy.orm import Session
 from sqlalchemy.engine.base import Engine
 
-from db import Base, VideoTable, ChannelTable
-from download import download_thumbnail, download_video
+from yrp.db import Base, VideoTable, ChannelTable
+from yrp.download import download_thumbnail, download_video
 
 import gi
 gi.require_version("Notify", "0.7")
@@ -50,7 +50,6 @@ class Backend:
         engine: Engine,
         thumbnail_dir: str,
         video_dir: str,
-        channel_ids: Collection[str],
     ) -> None:
         self.engine = engine
 
@@ -66,21 +65,49 @@ class Backend:
         self.video_dir = str(video_dir_path.absolute())
         logger.info(f'{self.video_dir=}')
 
-        self.channel_ids = set(channel_ids)
-        logger.info(f'{self.channel_ids=}')
-
-        # Recreate database tables
-        Base.metadata.drop_all(self.engine)
+        # Create tables if they don't exist
         Base.metadata.create_all(self.engine)
 
-        feed_urls = map(FEED_PREFIX.__add__, channel_ids)
-        # feeds = FEEDS
-        for feed_url in feed_urls:
-            self.fetch_feed(feed_url)
-        logger.info('Fetching feeds')
-        self.delete_orphan_channels()
-        self.clean_assets()
-        logger.info('Backend successfully initialised')
+        # self.channel_ids = set(channel_ids)
+        # logger.info(f'{self.channel_ids=}')
+        #
+        #
+        # feed_urls = map(FEED_PREFIX.__add__, channel_ids)
+        # # feeds = FEEDS
+        # for feed_url in feed_urls:
+        #     self.fetch_feed(feed_url)
+        # logger.info('Fetching feeds')
+        # # Bring database to a clean state
+        # self.delete_orphan_channels()
+        # self.clean_assets()
+        # logger.info('Backend successfully initialised')
+
+    def update_channels(self, channel_ids: Set[str]) -> None:
+        with Session(self.engine) as session:
+            query_result = session.scalars(select(ChannelTable.id))
+            existing_channel_ids = set(query_result.all())
+            unused_channel_ids = existing_channel_ids - channel_ids
+            if unused_channel_ids:
+                session.execute(
+                    delete(ChannelTable)
+                    .where(ChannelTable.id.in_(unused_channel_ids))
+                )
+                # Videos must be deleted explicitly because we are deleting in bulk
+                # using Core instead of using the cascade properties of ORM
+                session.execute(
+                    delete(VideoTable)
+                    .where(VideoTable.channel_id.in_(unused_channel_ids))
+                )
+            new_channel_ids = channel_ids - existing_channel_ids
+            if new_channel_ids:
+                values = [
+                    dict(id=channel_id)
+                    for channel_id in new_channel_ids
+                ]
+                # from IPython import embed
+                # embed()
+                session.execute(insert(ChannelTable), values)
+            session.commit()
 
     def update_fields(self, id: str, **kwargs: Any) -> None:
         with self.engine.begin() as conn:
@@ -133,13 +160,13 @@ class Backend:
             session.add(channel)
             session.commit()
 
-    def delete_orphan_channels(self) -> None:
-        """Delete channels from the database that are not included in `channel_ids`"""
-        with Session(self.engine) as session:
-            session.execute(
-                delete(ChannelTable)
-                .where(ChannelTable.id.not_in(self.channel_ids))
-            )
+    # def delete_orphan_channels(self) -> None:
+    #     """Delete channels from the database that are not included in `channel_ids`"""
+    #     with Session(self.engine) as session:
+    #         session.execute(
+    #             delete(ChannelTable)
+    #             .where(ChannelTable.id.not_in(self.channel_ids))
+    #         )
 
     def fetch_feed(self, feed_url: str) -> None:
         parsed_feed = feedparser.parse(feed_url)
@@ -181,7 +208,7 @@ class Backend:
             channel_title = session.scalar(
                 select(ChannelTable.title)
                 .join(VideoTable)
-                .where(VideoTable.id == id)
+                .filter_by(id=id)
             )
         if channel_title is None:
             raise ValueError(f"Video with id {id} does not exist in the database")

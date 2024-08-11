@@ -16,7 +16,7 @@ class Base(DeclarativeBase):
 class ChannelTable(Base):
     __tablename__ = "channel"
     id: Mapped[str] = mapped_column(String(24), primary_key=True)
-    title: Mapped[str] = mapped_column(String)
+    title: Mapped[Optional[str]] = mapped_column(String)
     last_updated: Mapped[Optional[str]]
     videos: Mapped[List["VideoTable"]] = relationship(
         back_populates="channel",

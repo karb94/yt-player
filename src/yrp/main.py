@@ -3,6 +3,7 @@ from ui import MyApp
 import sys
 from backend import Backend
 from xdg.BaseDirectory import save_data_path, save_config_path
+from yrp.db import Base
 from pathlib import Path
 import tomllib
 import re
@@ -26,6 +27,7 @@ if __name__ == "__main__":
                 raise ValueError(f"'{channel_id}' is not a valid channel ID")
 
     engine = create_engine('sqlite:///test.db')
+    Base.metadata.drop_all(engine)
     backend = Backend(
         engine=engine,
         thumbnail_dir=thumbnail_dir,
