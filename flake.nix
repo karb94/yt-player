@@ -13,6 +13,9 @@
       pkgs = nixpkgs.legacyPackages.${system};
       pythonPkgs =
         ps: with ps; [
+          aiofiles
+          aiohttp
+          aiosqlite
           beautifulsoup4
           feedparser
           ipython
@@ -22,6 +25,7 @@
           pygobject-stubs
           pygobject3
           pytest
+          pytest-asyncio
           pytest-bdd
           pyxdg
           requests
@@ -30,6 +34,7 @@
           types-beautifulsoup4
           types-python-dateutil
           types-requests
+          xdg-base-dirs
           yt-dlp
         ];
       myPython = pkgs.python3.withPackages pythonPkgs;
@@ -44,6 +49,11 @@
       ];
     in
     {
-      devShells.${system}.default = pkgs.mkShellNoCC { buildInputs = external_pkgs ++ [ myPython ]; };
+      devShells.${system}.default = pkgs.mkShellNoCC {
+        packages = external_pkgs ++ [ myPython ];
+        shellHook = ''
+          export PYTHONPATH="''${PYTHONPATH}:src"
+        '';
+      };
     };
 }

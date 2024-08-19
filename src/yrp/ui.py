@@ -1,11 +1,13 @@
 from datetime import datetime
 from subprocess import Popen
 from threading import Thread
+from time import sleep
 from dateutil.relativedelta import relativedelta
 from typing import Any
 
-from download import parse_progress
-from backend import Backend, Video
+from yrp.observer import Observer, Observable
+from yrp.download import parse_progress
+from yrp.backend import Video, query_video_ids, create_video, NewVideoEvent
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
@@ -19,6 +21,7 @@ display = Gdk.Display.get_default()
 if display is None:
     raise TypeError
 Gtk.StyleContext.add_provider_for_display(display, css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
 
 def get_time_ago(date_time: datetime) -> str:
     units = ("year", "month", "day", "hour", "minute")
@@ -40,13 +43,18 @@ class VideoCard(Gtk.ListBoxRow):
         grid = Gtk.Grid()
         grid.props.width_request = 300
         self.set_child(grid)
-        if not self.video.thumbnail_downloaded:
-            self.video.download_thumbnail()
-        img = Gtk.Picture.new_for_filename(video.thumbnail_path)
+        # if not self.video.thumbnail_downloaded:
+        #     self.video.download_thumbnail()
+        img = Gtk.Picture.new_for_filename(str(video.thumbnail_path))
         img.props.halign = Gtk.Align.START
         img.props.can_shrink = False
-        grid.attach(child=img, column=1, row=1, width=1, height=4) 
-        title = video.title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        grid.attach(child=img, column=1, row=1, width=1, height=4)
+        title = (
+            video.title
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+         )
         title_label = Gtk.Label(
             label=rf'<span weight="bold" size="x-large">{title}</span>',
             use_markup=True,
@@ -85,33 +93,56 @@ class VideoCard(Gtk.ListBoxRow):
         grid.attach(child=self.progress_bar, column=2, row=4, width=1, height=1) 
 
 
-class MainWindow(Gtk.ApplicationWindow):
-    def __init__(self, backend: Backend, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
-        self.backend = backend
+class NewVideoObserver(Observer):
+    def __init__(
+        self,
+        new_video_event: NewVideoEvent,
+        list_box: Gtk.ListBox,
+    ) -> None:
+        super().__init__(new_video_event)
+        self.list_box = list_box
 
-        self.shortcut_hits = 0
-        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.label = Gtk.Label(label="")
-        self.box.append(self.label)
+    def notify(self, observable: Observable, video_id: str) -> None:
+        print(f'Video {video_id} is ready')
+        video = create_video(video_id)
+        video_card = VideoCard(video)
+        revealer = Gtk.Revealer()
+        revealer.set_child(video_card)
+        revealer.set_transition_type(Gtk.RevealerTransitionType.CROSSFADE)
+        revealer.set_transition_duration(1000)
+        # revealer.set_reveal_child(True)
+        GLib.idle_add(self.list_box.append, revealer)
+        GLib.idle_add(revealer.set_reveal_child, True)
+
+
+class MainWindow(Gtk.ApplicationWindow):
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+
+        # self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # self.label = Gtk.Label(label="Hello World")
+        # self.box.append(self.label)
         # self.box.append(self.scrolled_window)
 
         self.scrolled_window = Gtk.ScrolledWindow()
         self.set_child(self.scrolled_window)
+
         self.list_box = Gtk.ListBox()
-        video_ids = self.backend.query_video_ids(watched=False)
-        for video_id in video_ids:
-            video = self.backend.create_video(video_id)
-            self.list_box.append(VideoCard(video))
-        # self.scrolled_window.set_child(self.list_box)
-        self.box.append(self.list_box)
-        self.scrolled_window.set_child(self.box)
-        # self.button1 = Gtk.Button(label="Hello")
-        # self.list_box.append(self.button1)
+        self.scrolled_window.set_child(self.list_box)
+
+        self.new_video_event = NewVideoEvent()
+        self.new_video_observer = NewVideoObserver(
+            self.new_video_event,
+            self.list_box,
+        )
 
         evk = Gtk.EventControllerKey.new()
         evk.connect("key-pressed", self.key_press)
         self.add_controller(evk)
+
+        thread = Thread(target=self.new_video_event.run)
+        thread.start()
+
 
     def key_press(
         self,
@@ -172,12 +203,11 @@ class MainWindow(Gtk.ApplicationWindow):
 
 
 class MyApp(Adw.Application):
-    def __init__(self, backend: Backend, *args: Any, **kwargs: Any):
-        self.backend = backend
+    def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.connect('activate', self.on_activate)
 
     def on_activate(self, app: Adw.Application) -> None:
-        self.win = MainWindow(backend=self.backend, application=app)
+        self.win = MainWindow(application=app)
         self.win.present()
 

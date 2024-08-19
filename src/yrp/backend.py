@@ -1,19 +1,24 @@
-from collections.abc import Set, Sequence, Collection
+import asyncio
+import aiofiles
+from collections.abc import Callable, Set, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from time import mktime, struct_time
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, Iterable, Optional
 import re
 import logging
 
-import feedparser
-import pandas as pd
-from sqlalchemy import delete, select, update, insert
-from sqlalchemy.orm import Session
-from sqlalchemy.engine.base import Engine
+from aiohttp.client import ClientSession
+import yrp.config as config
 
-from yrp.db import Base, VideoTable, ChannelTable
-from yrp.download import download_thumbnail, download_video
+import feedparser
+from sqlalchemy import delete, select, update, insert
+
+from yrp import db as db
+from yrp.download import download_video
+from yrp.observer import Observable, Observable
+import aiohttp
 
 import gi
 gi.require_version("Notify", "0.7")
@@ -36,6 +41,55 @@ FEEDS = [
 ]
 
 
+def get_thumbnail_path(id: str) -> Path:
+    return config.thumbnail_dir.absolute() / f"{id}.{THUMBNAIL_FORMAT}"
+
+
+def get_video_path(id: str) -> Path:
+    return config.video_dir.absolute() / f"{id}.{VIDEO_FORMAT}"
+
+
+def update_channels(channel_ids: Set[str]) -> None:
+    with db.Session() as session:
+        query_result = session.scalars(select(db.Channel.id))
+        existing_channel_ids = set(query_result)
+        unused_channel_ids = existing_channel_ids - channel_ids
+        if unused_channel_ids:
+            session.execute(
+                delete(db.Channel)
+                .where(db.Channel.id.in_(unused_channel_ids))
+            )
+            # db.Videos must be deleted explicitly because we are deleting in bulk
+            # using Core instead of using the cascade properties of ORM
+            session.execute(
+                delete(db.Video)
+                .where(db.Video.channel_id.in_(unused_channel_ids))
+            )
+        new_channel_ids = channel_ids - existing_channel_ids
+        if new_channel_ids:
+            values = [
+                dict(id=channel_id)
+                for channel_id in new_channel_ids
+            ]
+            session.execute(insert(db.Channel), values)
+        session.commit()
+
+
+class Feed(TypedDict):
+    title: str
+
+
+class Entry(TypedDict):
+    yt_videoid: str
+    title: str
+    published_parsed: struct_time
+
+
+class ParsedFeed(TypedDict):
+    feed: Feed
+    entries: list[Entry]
+
+
 def extract_channel_id(feed: str) -> str:
     match = channel_id_regex.fullmatch(feed)
     if match is None:
@@ -44,233 +98,9 @@ def extract_channel_id(feed: str) -> str:
         return match.group(1)
 
 
-class Backend:
-    def __init__(
-        self,
-        engine: Engine,
-        thumbnail_dir: str,
-        video_dir: str,
-    ) -> None:
-        self.engine = engine
-
-        # Create thumbnail directory
-        thumbnail_dir_path = Path(thumbnail_dir)
-        thumbnail_dir_path.mkdir(parents=True, exist_ok=True)
-        self.thumbnail_dir = str(thumbnail_dir_path.absolute())
-        logger.info(f'{self.thumbnail_dir=}')
-
-        # Create video directory
-        video_dir_path = Path(video_dir)
-        video_dir_path.mkdir(parents=True, exist_ok=True)
-        self.video_dir = str(video_dir_path.absolute())
-        logger.info(f'{self.video_dir=}')
-
-        # Create tables if they don't exist
-        Base.metadata.create_all(self.engine)
-
-        # self.channel_ids = set(channel_ids)
-        # logger.info(f'{self.channel_ids=}')
-        #
-        #
-        # feed_urls = map(FEED_PREFIX.__add__, channel_ids)
-        # # feeds = FEEDS
-        # for feed_url in feed_urls:
-        #     self.fetch_feed(feed_url)
-        # logger.info('Fetching feeds')
-        # # Bring database to a clean state
-        # self.delete_orphan_channels()
-        # self.clean_assets()
-        # logger.info('Backend successfully initialised')
-
-    def update_channels(self, channel_ids: Set[str]) -> None:
-        with Session(self.engine) as session:
-            query_result = session.scalars(select(ChannelTable.id))
-            existing_channel_ids = set(query_result.all())
-            unused_channel_ids = existing_channel_ids - channel_ids
-            if unused_channel_ids:
-                session.execute(
-                    delete(ChannelTable)
-                    .where(ChannelTable.id.in_(unused_channel_ids))
-                )
-                # Videos must be deleted explicitly because we are deleting in bulk
-                # using Core instead of using the cascade properties of ORM
-                session.execute(
-                    delete(VideoTable)
-                    .where(VideoTable.channel_id.in_(unused_channel_ids))
-                )
-            new_channel_ids = channel_ids - existing_channel_ids
-            if new_channel_ids:
-                values = [
-                    dict(id=channel_id)
-                    for channel_id in new_channel_ids
-                ]
-                # from IPython import embed
-                # embed()
-                session.execute(insert(ChannelTable), values)
-            session.commit()
-
-    def update_fields(self, id: str, **kwargs: Any) -> None:
-        with self.engine.begin() as conn:
-            conn.execute(
-                update(VideoTable)
-                .filter_by(id=id)
-                .values(**kwargs)
-            )
-
-    def get_thumbnail_path(self, id: str) -> str:
-        return str(Path(self.thumbnail_dir).absolute() / f"{id}.{THUMBNAIL_FORMAT}")
-
-    def get_video_path(self, id: str) -> str:
-        return str(Path(self.video_dir).absolute() / f"{id}.{VIDEO_FORMAT}")
-
-    def add_new_videos(self, parsed_feed: Any) -> None:
-        channel_id = extract_channel_id(parsed_feed.href)
-        db_video_ids = set(self.query_video_ids())
-        video_df = pd.DataFrame(data=parsed_feed.entries, columns=VIDEO_ATTRIBUTES)
-        missing_video_ids = list(set(video_df["yt_videoid"]) - db_video_ids)
-        video_df = (
-            video_df
-            .rename(columns={
-                "yt_videoid": "id",
-                "published": "publication_dt",
-            })
-            .set_index("id")
-            .loc[missing_video_ids]
-            .assign(
-                publication_dt=lambda df: pd.to_datetime(df["publication_dt"]),
-                channel_id=channel_id,
-                downloading=False,
-                watched=False,
-            )
-            .sort_values("publication_dt")
-            .iloc[:1]
-        )
-        logger.info(f"Writing {len(video_df)} videos to database")
-        video_df.to_sql("video", self.engine, if_exists="append")
-
-    def insert_channel(self, parsed_feed: Any) -> None:
-        channel_id = extract_channel_id(parsed_feed.href)
-        channel_title = parsed_feed.feed.title
-        with Session(self.engine) as session:
-            channel = ChannelTable(
-                id=channel_id,
-                title=channel_title,
-                last_updated=datetime.now()
-            )
-            session.add(channel)
-            session.commit()
-
-    # def delete_orphan_channels(self) -> None:
-    #     """Delete channels from the database that are not included in `channel_ids`"""
-    #     with Session(self.engine) as session:
-    #         session.execute(
-    #             delete(ChannelTable)
-    #             .where(ChannelTable.id.not_in(self.channel_ids))
-    #         )
-
-    def fetch_feed(self, feed_url: str) -> None:
-        parsed_feed = feedparser.parse(feed_url)
-        logger.info(f'Parsing feed {parsed_feed.keys()}')
-        if parsed_feed["status"] != 200:
-            raise ConnectionError(f"feedparser exited with status {parsed_feed['status']}")
-        self.insert_channel(parsed_feed)
-        self.add_new_videos(parsed_feed)
-
-    def clean_assets(self) -> None:
-        """Delete videos and thumbnails from videos that either don't exist in the database or have been watched"""
-        video_ids = tuple(self.query_video_ids(watched=False))
-        for video_path in Path(self.video_dir).iterdir():
-            if video_path.suffix != VIDEO_FORMAT:
-                video_path.unlink()
-            if video_path.stem not in video_ids:
-                video_path.unlink()
-        for thumbnail_path in Path(self.thumbnail_dir).iterdir():
-            if thumbnail_path.suffix != THUMBNAIL_FORMAT:
-                thumbnail_path.unlink()
-            if thumbnail_path.stem not in video_ids:
-                thumbnail_path.unlink()
-
-    def query_video_ids(self, **kwargs: Any) -> Sequence[str]:
-        with Session(self.engine) as session:
-            query_result = session.scalars(
-                select(VideoTable.id)
-                .order_by(VideoTable.publication_dt.desc())
-                .filter_by(**kwargs)
-            )
-        return query_result.all()
-
-    def create_notification(self, id: str) -> Notify.Notification:
-        Notify.init()
-        with Session(self.engine) as session:
-            title = session.scalar(select(VideoTable.title).filter_by(id=id))
-        thumbnail_path = str(Path(self.thumbnail_dir).absolute() / f"{id}.{THUMBNAIL_FORMAT}")
-        with Session(self.engine) as session:
-            channel_title = session.scalar(
-                select(ChannelTable.title)
-                .join(VideoTable)
-                .filter_by(id=id)
-            )
-        if channel_title is None:
-            raise ValueError(f"Video with id {id} does not exist in the database")
-        notification = Notify.Notification.new(channel_title, title, thumbnail_path)
-        notification.set_timeout(Notify.EXPIRES_NEVER)
-        notification.set_app_name("yt-player")
-        tag = GLib.Variant.new_string(id)
-        notification.set_hint("x-dunst-stack-tag", tag)
-        return notification
-
-    def download_video(self, id: str, with_notification: bool, **ytdlp_kwargs: Any) -> None:
-        self.update_fields(id, downloading=True)
-        notification = self.create_notification(id) if with_notification else None
-        output_format = VIDEO_FORMAT
-        filename = f"{id}.{output_format}"
-        video_path = str(Path(self.video_dir) / filename)
-        ytdlp_kwargs["merge_output_format"] = output_format
-        ytdlp_kwargs["noprogress"] = output_format
-
-        download_video(
-            url=id,
-            path=video_path,
-            notification=notification,
-            **ytdlp_kwargs,
-        )
-        self.update_fields(id, downloading=False)
-
-    def create_video(self, id: str) -> "Video":
-        with Session(self.engine) as session:
-            video = session.scalar(
-                select(VideoTable)
-                .filter_by(id=id)
-            )
-            if video is None:
-                raise ValueError(f"Video with id {id} does not exists in the database")
-            return Video(
-                backend=self,
-                id=video.id,
-                publication_dt=video.publication_dt,
-                title=video.title,
-                channel_id=video.channel.id,
-                channel_title=video.channel.title,
-            )
-
-    def delete_video_assets(self, id: str) -> None:
-        video_path = self.get_video_path(id)
-        Path(video_path).unlink(missing_ok=True)
-        thumbnail_path = self.get_thumbnail_path(id)
-        Path(thumbnail_path).unlink(missing_ok=True)
-
-    def delete_video(self, id: str) -> None:
-        self.delete_video_assets(id)
-        with Session(self.engine) as session:
-            session.execute(
-                delete(VideoTable)
-                .filter_by(id=id)
-            )
-
 
 @dataclass
 class Video:
-    backend: Backend
     id: str
     publication_dt: datetime
     title: str
@@ -278,11 +108,11 @@ class Video:
     channel_title: str
 
     def __post_init__(self) -> None:
-        self.path = self.backend.get_video_path(self.id)
-        self.thumbnail_path = self.backend.get_thumbnail_path(self.id)
+        self.path = get_video_path(self.id)
+        self.thumbnail_path = get_thumbnail_path(self.id)
 
     def download(self, **kwargs: Any) -> None:
-        self.backend.download_video(self.id, **kwargs)
+        download_video_with_notification(self.id, **kwargs)
 
     @property
     def downloaded(self) -> bool:
@@ -290,9 +120,9 @@ class Video:
 
     @property
     def downloading(self) -> bool | None:
-        with Session(self.backend.engine) as session:
+        with db.Session() as session:
             return session.scalar(
-                select(VideoTable.downloading)
+                select(db.Video.downloading)
                 .filter_by(id=id)
             )
 
@@ -300,31 +130,230 @@ class Video:
     def thumbnail_downloaded(self) -> bool:
         return Path(self.thumbnail_path).is_file()
 
-    def download_thumbnail(self) -> None:
-        if not self.thumbnail_downloaded:
-            download_thumbnail(self.id, self.thumbnail_path)
+    # def download_thumbnail(self) -> None:
+    #     if not self.thumbnail_downloaded:
+    #         download_thumbnail(self.id, str(self.thumbnail_path))
 
     @property
     def watched(self) -> bool | None:
-        with Session(self.backend.engine) as session:
+        with db.Session() as session:
             return session.scalar(
-                select(VideoTable.watched)
+                select(db.Video.watched)
                 .filter_by(id=id)
             )
 
     @watched.setter
     def watched(self, value: bool) -> None:
-        with Session(self.backend.engine) as session:
+        with db.Session() as session:
             session.execute(
-                update(VideoTable)
+                update(db.Video)
                 .filter_by(id=self.id)
                 .values(watched=value)
             )
             self.delete_assets()
 
     def delete_assets(self) -> None:
-        self.backend.delete_video_assets(self.id)
+        delete_video_assets(self.id)
 
     def delete(self) -> None:
-        self.backend.delete_video(self.id)
+        delete_video(self.id)
+
+
+def create_video(id: str) -> Video:
+    with db.Session() as session:
+        video = session.scalar(
+            select(db.Video)
+            .filter_by(id=id)
+        )
+        if video is None:
+            raise ValueError(f"db.Video with id {id} does not exists in the database")
+        return Video(
+            id=video.id,
+            publication_dt=video.publication_dt,
+            title=video.title,
+            channel_id=video.channel.id,
+            channel_title=video.channel.title or "Missing channel title",
+        )
+
+
+def make_video_row(entry: Entry, channel_id: str) -> db.Video:
+    timestamp = mktime(entry["published_parsed"])
+    return db.Video(
+        id=entry["yt_videoid"],
+        channel_id=channel_id,
+        title=entry["title"],
+        publication_dt=datetime.fromtimestamp(timestamp),
+    )
+
+
+async def upload_feed_data(channel_id: str, parsed_feed: ParsedFeed) -> None:
+    async with db.AsyncSession() as sa_session:
+        channel = await sa_session.get_one(db.Channel, channel_id)
+        channel.title = parsed_feed['feed']['title']
+        channel.last_updated = datetime.now()
+        sa_session.add(channel)
+        query_result = await sa_session.scalars(select(db.Video.id))
+        existing_video_ids = set(query_result)
+        sa_session.add_all(
+            make_video_row(entry, channel_id)
+            for entry in parsed_feed['entries']
+            if entry["yt_videoid"] not in existing_video_ids
+        )
+        await sa_session.commit()
+
+
+async def fetch_feed(
+    http_session: aiohttp.ClientSession,
+    channel_id: str
+) -> None:
+    feed_url = FEED_PREFIX + channel_id
+    async with http_session.get(feed_url) as resp:
+        if resp.status == 200:
+            text = await resp.text()
+            parsed_feed = feedparser.parse(text)
+            await upload_feed_data(channel_id, parsed_feed)
+
+
+async def download_thumbnail(
+    http_session: ClientSession,
+    video_id: str,
+    callback: Optional[Callable[[str], None]],
+) -> None:
+    thumbnail_path = get_thumbnail_path(video_id)
+    if not thumbnail_path.is_file():
+        url = f"http://img.youtube.com/vi/{video_id}/mqdefault.jpg"
+        async with aiohttp.ClientSession() as http_session:
+            async with http_session.get(url) as resp:
+                if resp.status == 200:
+                    async with aiofiles.open(thumbnail_path, mode='wb') as f:
+                        await f.write(await resp.read())
+    if callback is not None:
+        await asyncio.to_thread(callback, video_id)
+
+
+async def fetch_feeds(
+    callback: Optional[Callable[[str], None]] = None,
+) -> None:
+    with db.Session() as session:
+        channel_ids = set(session.scalars(select(db.Channel.id)))
+    async with aiohttp.ClientSession() as http_session:
+        async with asyncio.TaskGroup() as tg:
+            for channel_id in channel_ids:
+                tg.create_task(fetch_feed(http_session, channel_id))
+        with db.Session() as session:
+            cutoff_dt = datetime.now() - config.no_older_than
+            video_ids = set(session.scalars(
+                select(db.Video.id)
+                .where(db.Video.publication_dt > cutoff_dt)
+            ))
+        async with asyncio.TaskGroup() as tg:
+            for video_id in video_ids:
+                cr = download_thumbnail(http_session, video_id, callback)
+                tg.create_task(cr)
+
+
+def main() -> None:
+    # db.bind_engines('test.db')
+    update_channels(config.channel_ids)
+    asyncio.run(fetch_feeds())
+
+
+class NewVideoEvent(Observable):
+    def run(self) -> None:
+        update_channels(config.channel_ids)
+        def new_video_callback(video_id: str) -> None:
+            self.notify_observers(video_id)
+        asyncio.run(fetch_feeds(new_video_callback))
+
+
+def query_video_ids(**kwargs: Any) -> Sequence[str]:
+    cutoff_dt = datetime.now() - config.no_older_than
+    with db.Session() as session:
+        query_result = session.scalars(
+            select(db.Video.id)
+            .order_by(db.Video.publication_dt.desc())
+            .where(db.Video.publication_dt > cutoff_dt)
+            .filter_by(**kwargs)
+        )
+        return tuple(query_result)
+
+
+def clean_assets() -> None:
+    """Delete videos and thumbnails from videos that either don't exist in the database or have been watched"""
+    video_ids = tuple(query_video_ids(watched=False))
+    for video_path in config.video_dir.iterdir():
+        if video_path.suffix != VIDEO_FORMAT:
+            video_path.unlink()
+        if video_path.stem not in video_ids:
+            video_path.unlink()
+    for thumbnail_path in config.thumbnail_dir.iterdir():
+        if thumbnail_path.suffix != THUMBNAIL_FORMAT:
+            thumbnail_path.unlink()
+        if thumbnail_path.stem not in video_ids:
+            thumbnail_path.unlink()
+
+
+def update_fields(id: str, **kwargs: Any) -> None:
+    with db.Session() as session:
+        session.execute(
+            update(db.Video)
+            .filter_by(id=id)
+            .values(**kwargs)
+        )
+
+
+def create_notification(id: str) -> Notify.Notification:
+    Notify.init()
+    with db.Session() as session:
+        title = session.scalar(select(db.Video.title).filter_by(id=id))
+    with db.Session() as session:
+        channel_title = session.scalar(
+            select(db.Channel.title)
+            .join(db.Video)
+            .filter_by(id=id)
+        )
+    if channel_title is None:
+        raise ValueError(f"db.Video with id {id} does not exist in the database")
+    thumbnail_path = str(get_thumbnail_path(id))
+    notification = Notify.Notification.new(channel_title, title, thumbnail_path)
+    notification.set_timeout(Notify.EXPIRES_NEVER)
+    notification.set_app_name("yt-player")
+    tag = GLib.Variant.new_string(id)
+    notification.set_hint("x-dunst-stack-tag", tag)
+    return notification
+
+
+def download_video_with_notification(
+    id: str,
+    with_notification: bool,
+    **ytdlp_kwargs: Any
+) -> None:
+    update_fields(id, downloading=True)
+    notification = create_notification(id) if with_notification else None
+    video_path = str(get_video_path(id))
+    ytdlp_kwargs["merge_output_format"] = VIDEO_FORMAT
+    ytdlp_kwargs["noprogress"] = VIDEO_FORMAT
+
+    download_video(
+        url=id,
+        path=video_path,
+        notification=notification,
+        **ytdlp_kwargs,
+    )
+    update_fields(id, downloading=False)
+
+
+def delete_video_assets(id: str) -> None:
+    video_path = get_video_path(id)
+    Path(video_path).unlink(missing_ok=True)
+    thumbnail_path = get_thumbnail_path(id)
+    Path(thumbnail_path).unlink(missing_ok=True)
+
+def delete_video(id: str) -> None:
+    delete_video_assets(id)
+    with db.Session() as session:
+        session.execute(
+            delete(db.Video)
+            .filter_by(id=id)
+        )
 

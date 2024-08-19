@@ -1,17 +1,13 @@
 from datetime import datetime
 from pytest_bdd.parsers import parse
-from pytest_bdd import parsers
-from collections.abc import Collection
-from pytest_bdd import scenarios, scenario, given, when, then
-from sqlalchemy.orm import Session
-from yrp.backend import Backend
-from sqlalchemy import inspect
-from yrp.db import VideoTable, ChannelTable
-from pathlib import Path
-from sqlalchemy import Engine, select
+from pytest_bdd import scenarios, given, when, then
+from yrp.backend import update_channels
+from yrp.db import Session, Channel, Video
+from sqlalchemy import select
 
 
 scenarios("../features/update_channels.feature")
+
 
 @given("no channels in the channel table")
 def no_channels_in_table() -> None:
@@ -20,32 +16,21 @@ def no_channels_in_table() -> None:
 
 @given(
     parse("channel {channel_id} is in the channel table"),
-    target_fixture='engine',
+    target_fixture="engine",
 )
-def database_has_channel(
-    engine_with_tables: Engine,
-    channel_id: str
-) -> Engine:
-    with Session(engine_with_tables) as session:
-        channel = ChannelTable(id=channel_id)
+def database_has_channel(channel_id: str) -> None:
+    with Session() as session:
+        channel = Channel(id=channel_id)
         session.add(channel)
         session.commit()
-    return engine_with_tables
+
 
 @given(
-    parse(
-        "video {video_id} from channel {channel_id} "
-        "is in the video table"
-    ),
-    target_fixture='engine',
+    parse("video {video_id} from channel {channel_id} is in the video table")
 )
-def backend_with_video_from_channel(
-    engine_with_tables: Engine,
-    channel_id: str,
-    video_id: str,
-) -> Engine:
-    with Session(engine_with_tables) as session:
-        video = VideoTable(
+def db_with_video_from_channel(channel_id: str, video_id: str) -> None:
+    with Session() as session:
+        video = Video(
             id=video_id,
             title=video_id,
             publication_dt=datetime(year=2000, month=1, day=1),
@@ -53,52 +38,38 @@ def backend_with_video_from_channel(
         )
         session.add(video)
         session.commit()
-    return engine_with_tables
 
 
-@when(
-    parse("the channels are updated with channel {channel_id}"),
-    target_fixture='backend',
-)
-def update_channels(backend: Backend, channel_id: str) -> Backend:
-    backend.update_channels({channel_id})
-    return backend
+@when(parse("the channels are updated with channel {channel_id}"))
+def run_update_channels(channel_id: str) -> None:
+    update_channels({channel_id})
 
 
-@then(parse( "the channel {channel} should not be in the channel table"))
-def channel_not_in_table(backend: Backend, channel: str) -> None:
-    with Session(backend.engine) as session:
+@then(parse("the channel {channel_id} should be in the channel table"))
+def channel_in_table(channel_id: str) -> None:
+    with Session() as session:
         query_result = session.scalars(
-            select(ChannelTable)
-            .filter_by(id=channel)
+            select(Channel).filter_by(id=channel_id)
         )
+        assert query_result.one_or_none() is not None
+
+
+@then(parse("the video {video_id} should be in the video table"))
+def video_in_table(video_id: str) -> None:
+    with Session() as session:
+        query_result = session.scalars(select(Video).filter_by(id=video_id))
+        assert query_result.one_or_none() is not None
+
+
+@then(parse("the channel {channel} should not be in the channel table"))
+def channel_not_in_table(channel: str) -> None:
+    with Session() as session:
+        query_result = session.scalars(select(Channel).filter_by(id=channel))
         assert query_result.one_or_none() is None
 
 
 @then(parse("the video {video_id} should not be in the video table"))
-def video_not_in_table(backend: Backend, video_id: str) -> None:
-    with Session(backend.engine) as session:
-        query_result = session.scalars(
-            select(VideoTable)
-            .filter_by(id=video_id)
-        )
+def video_not_in_table(video_id: str) -> None:
+    with Session() as session:
+        query_result = session.scalars(select(Video).filter_by(id=video_id))
         assert query_result.one_or_none() is None
-
-
-@then(parse( "the channel {channel_id} should be in the channel table"))
-def channel_in_table(backend: Backend, channel_id: str) -> None:
-    with Session(backend.engine) as session:
-        query_result = session.scalars(
-            select(ChannelTable)
-            .filter_by(id=channel_id)
-        )
-        assert query_result.one_or_none() is not None
-
-@then(parse("the video {video_id} should be in the video table"))
-def video_in_table(backend: Backend, video_id: str) -> None:
-    with Session(backend.engine) as session:
-        query_result = session.scalars(
-            select(VideoTable)
-            .filter_by(id=video_id)
-        )
-        assert query_result.one_or_none() is not None
