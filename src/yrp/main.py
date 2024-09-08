@@ -1,6 +1,5 @@
 from ui import MyApp
 import sys
-from yrp.backend import main
 import logging
 
 logging.basicConfig(level=logging.INFO)

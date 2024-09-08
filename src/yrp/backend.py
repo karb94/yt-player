@@ -78,7 +78,7 @@ class Feed(TypedDict):
     title: str
 
 
-class Entry(TypedDict):
+class VideoEntry(TypedDict):
     yt_videoid: str
     title: str
     published_parsed: struct_time
@@ -86,7 +86,7 @@ class Entry(TypedDict):
 
 class ParsedFeed(TypedDict):
     feed: Feed
-    entries: list[Entry]
+    entries: list[VideoEntry]
 
 
 def extract_channel_id(feed: str) -> str:
@@ -97,90 +97,7 @@ def extract_channel_id(feed: str) -> str:
         return match.group(1)
 
 
-@dataclass
-class Video:
-    video: InitVar[db.Video]
-    id: str = field(init=False)
-    publication_dt: datetime = field(init=False)
-    title: str = field(init=False)
-    channel_id: str = field(init=False)
-    channel_title: str = field(init=False)
-
-    def __post_init__(self, video: db.Video) -> None:
-        self.path = get_video_path(video.id)
-        self.thumbnail_path = get_thumbnail_path(video.id)
-        self.id = video.id
-        self.publication_dt = video.publication_dt
-        self.title = video.title
-        self.channel_id = video.channel.id
-        self.channel_title = video.channel.title or "Missing channel title"
-
-    def download(self, **kwargs: Any) -> None:
-        download_video_with_notification(self.id, **kwargs)
-
-    @property
-    def downloaded(self) -> bool:
-        return Path(self.path).is_file()
-
-    @property
-    def downloading(self) -> bool | None:
-        with db.Session() as session:
-            return session.scalar(
-                select(db.Video.downloading)
-                .filter_by(id=id)
-            )
-
-    @property
-    def thumbnail_downloaded(self) -> bool:
-        return Path(self.thumbnail_path).is_file()
-
-    # def download_thumbnail(self) -> None:
-    #     if not self.thumbnail_downloaded:
-    #         download_thumbnail(self.id, str(self.thumbnail_path))
-
-    @property
-    def watched(self) -> bool | None:
-        with db.Session() as session:
-            return session.scalar(
-                select(db.Video.watched)
-                .filter_by(id=id)
-            )
-
-    @watched.setter
-    def watched(self, value: bool) -> None:
-        with db.Session.begin() as session:
-            session.execute(
-                update(db.Video)
-                .filter_by(id=self.id)
-                .values(watched=value)
-            )
-        self.delete_assets()
-
-    def delete_assets(self) -> None:
-        delete_video_assets(self.id)
-
-    def delete(self) -> None:
-        delete_video(self.id)
-
-
-def get_videos() -> Iterable[Video]:
-    cutoff_dt = datetime.now() - config.no_older_than
-    with db.Session() as session:
-        videos = session.scalars(
-            select(db.Video)
-            .where(db.Video.publication_dt > cutoff_dt)
-            .order_by(db.Video.publication_dt.desc())
-            .filter_by(watched=False)
-        )
-        return tuple(map(Video, videos))
-
-
-def create_video(id: str) -> Video:
-    with db.Session() as session:
-        return Video(session.get_one(db.Video, id))
-
-
-def make_video_row(entry: Entry, channel_id: str) -> db.Video:
+def make_video_row(entry: VideoEntry, channel_id: str) -> db.Video:
     timestamp = mktime(entry["published_parsed"])
     return db.Video(
         id=entry["yt_videoid"],
@@ -198,11 +115,15 @@ async def upload_feed_data(channel_id: str, parsed_feed: ParsedFeed) -> None:
         sa_session.add(channel)
         query = select(db.Video.id).filter_by(channel_id=channel_id)
         existing_video_ids = set(await sa_session.scalars(query))
-        sa_session.add_all(
-            make_video_row(entry, channel_id)
-            for entry in parsed_feed['entries']
-            if entry["yt_videoid"] not in existing_video_ids
-        )
+        channel_filter = config.channel_filters.get(channel_id)
+        for entry in parsed_feed['entries']:
+            video_id = entry["yt_videoid"]
+            if video_id not in existing_video_ids:
+                continue
+            if channel_filter is not None and not channel_filter.filter(entry):
+                continue
+            video = make_video_row(entry, channel_id)
+            sa_session.add(video)
 
 
 async def fetch_feed(
@@ -211,10 +132,11 @@ async def fetch_feed(
 ) -> None:
     feed_url = FEED_PREFIX + channel_id
     async with http_session.get(feed_url) as resp:
-        if resp.status == 200:
-            text = await resp.text()
-            parsed_feed = feedparser.parse(text)
-            await upload_feed_data(channel_id, parsed_feed)
+        if resp.status != 200:
+            return
+        text = await resp.text()
+    parsed_feed = feedparser.parse(text)
+    await upload_feed_data(channel_id, parsed_feed)
 
 
 async def download_thumbnail(
@@ -227,9 +149,10 @@ async def download_thumbnail(
         url = f"http://img.youtube.com/vi/{video_id}/mqdefault.jpg"
         async with aiohttp.ClientSession() as http_session:
             async with http_session.get(url) as resp:
-                if resp.status == 200:
-                    async with aiofiles.open(thumbnail_path, mode='wb') as f:
-                        await f.write(await resp.read())
+                if resp.status != 200:
+                    return
+                async with aiofiles.open(thumbnail_path, mode='wb') as f:
+                    await f.write(await resp.read())
     if callback is not None:
         await asyncio.to_thread(callback, video_id)
 
@@ -255,17 +178,17 @@ async def fetch_feeds(
                 tg.create_task(cr)
 
 
-def main() -> None:
-    update_channels(config.channel_ids)
-    asyncio.run(fetch_feeds())
-
-
-class NewVideoEvent(Observable):
-    def run(self) -> None:
-        update_channels(config.channel_ids)
-        def new_video_callback(video_id: str) -> None:
-            self.notify_observers(video_id)
-        asyncio.run(fetch_feeds(new_video_callback))
+# def main() -> None:
+#     update_channels(config.channel_ids)
+#     asyncio.run(fetch_feeds())
+#
+#
+# class NewVideoEvent(Observable):
+#     def run(self) -> None:
+#         update_channels(config.channel_ids)
+#         def new_video_callback(video_id: str) -> None:
+#             self.notify_observers(video_id)
+#         asyncio.run(fetch_feeds(new_video_callback))
 
 
 def query_video_ids(**kwargs: Any) -> Sequence[str]:
@@ -360,3 +283,84 @@ def delete_video(id: str) -> None:
                 .filter_by(id=id)
             )
 
+@dataclass
+class Video:
+    video: InitVar[db.Video]
+    id: str = field(init=False)
+    publication_dt: datetime = field(init=False)
+    title: str = field(init=False)
+    channel_id: str = field(init=False)
+    channel_title: str = field(init=False)
+
+    def __post_init__(self, video: db.Video) -> None:
+        self.path = get_video_path(video.id)
+        self.thumbnail_path = get_thumbnail_path(video.id)
+        self.id = video.id
+        self.publication_dt = video.publication_dt
+        self.title = video.title
+        self.channel_id = video.channel.id
+        self.channel_title = video.channel.title or "Missing channel title"
+
+    def download(self, **kwargs: Any) -> None:
+        download_video_with_notification(self.id, **kwargs)
+
+    @property
+    def downloaded(self) -> bool:
+        return Path(self.path).is_file()
+
+    @property
+    def downloading(self) -> bool | None:
+        with db.Session() as session:
+            return session.scalar(
+                select(db.Video.downloading)
+                .filter_by(id=id)
+            )
+
+    @property
+    def thumbnail_downloaded(self) -> bool:
+        return Path(self.thumbnail_path).is_file()
+
+    # def download_thumbnail(self) -> None:
+    #     if not self.thumbnail_downloaded:
+    #         download_thumbnail(self.id, str(self.thumbnail_path))
+
+    @property
+    def watched(self) -> bool | None:
+        with db.Session() as session:
+            return session.scalar(
+                select(db.Video.watched)
+                .filter_by(id=id)
+            )
+
+    @watched.setter
+    def watched(self, value: bool) -> None:
+        with db.Session.begin() as session:
+            session.execute(
+                update(db.Video)
+                .filter_by(id=self.id)
+                .values(watched=value)
+            )
+        self.delete_assets()
+
+    def delete_assets(self) -> None:
+        delete_video_assets(self.id)
+
+    def delete(self) -> None:
+        delete_video(self.id)
+
+
+def get_videos() -> Iterable[Video]:
+    cutoff_dt = datetime.now() - config.no_older_than
+    with db.Session() as session:
+        videos = session.scalars(
+            select(db.Video)
+            .where(db.Video.publication_dt > cutoff_dt)
+            .order_by(db.Video.publication_dt.desc())
+            .filter_by(watched=False)
+        )
+        return tuple(map(Video, videos))
+
+
+def create_video(id: str) -> Video:
+    with db.Session() as session:
+        return Video(session.get_one(db.Video, id))
