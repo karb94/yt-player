@@ -4,10 +4,14 @@ from threading import Thread
 from time import sleep
 from dateutil.relativedelta import relativedelta
 from typing import Any
+import asyncio
 
 from yrp.observer import Observer, Observable
 from yrp.download import parse_progress
-from yrp.backend import Video, query_video_ids, create_video, NewVideoEvent
+from yrp.backend import (
+        Video, get_videos, create_video, update_channels, fetch_feeds
+)
+import yrp.config as config
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
@@ -20,7 +24,11 @@ css_provider.load_from_path('style.css')
 display = Gdk.Display.get_default()
 if display is None:
     raise TypeError
-Gtk.StyleContext.add_provider_for_display(display, css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+Gtk.StyleContext.add_provider_for_display(
+    display,
+    css_provider,
+    Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+)
 
 
 def get_time_ago(date_time: datetime) -> str:
@@ -40,11 +48,15 @@ class VideoCard(Gtk.ListBoxRow):
         super().__init__(*args, **kwargs)
         self.video = video
 
+        self.revealer = Gtk.Revealer()
+        self.revealer.set_transition_type(Gtk.RevealerTransitionType.CROSSFADE)
+        self.revealer.set_transition_duration(2000)
+        self.set_child(self.revealer)
+
         grid = Gtk.Grid()
         grid.props.width_request = 300
-        self.set_child(grid)
-        # if not self.video.thumbnail_downloaded:
-        #     self.video.download_thumbnail()
+        self.revealer.set_child(grid)
+
         img = Gtk.Picture.new_for_filename(str(video.thumbnail_path))
         img.props.halign = Gtk.Align.START
         img.props.can_shrink = False
@@ -77,7 +89,7 @@ class VideoCard(Gtk.ListBoxRow):
             vexpand=True,
             margin_start=10,
         )
-        grid.attach(child=publication_label, column=2, row=3, width=1, height=1) 
+        grid.attach(child=publication_label, column=2, row=3, width=1, height=1)
         self.progress_bar = Gtk.ProgressBar(
             hexpand=True,
             show_text=True,
@@ -90,39 +102,23 @@ class VideoCard(Gtk.ListBoxRow):
             return
         self.progress_bar_label.props.halign = Gtk.Align.START
         self.progress_bar_label.props.margin_start = 10
-        grid.attach(child=self.progress_bar, column=2, row=4, width=1, height=1) 
+        grid.attach(child=self.progress_bar, column=2, row=4, width=1, height=1)
 
 
-class NewVideoObserver(Observer):
-    def __init__(
-        self,
-        new_video_event: NewVideoEvent,
-        list_box: Gtk.ListBox,
-    ) -> None:
-        super().__init__(new_video_event)
-        self.list_box = list_box
-
-    def notify(self, observable: Observable, video_id: str) -> None:
-        print(f'Video {video_id} is ready')
-        video = create_video(video_id)
-        video_card = VideoCard(video)
-        revealer = Gtk.Revealer()
-        revealer.set_child(video_card)
-        revealer.set_transition_type(Gtk.RevealerTransitionType.CROSSFADE)
-        revealer.set_transition_duration(1000)
-        # revealer.set_reveal_child(True)
-        GLib.idle_add(self.list_box.append, revealer)
-        GLib.idle_add(revealer.set_reveal_child, True)
+def init_backend(list_box: Gtk.ListBox) -> None:
+    update_channels(config.channel_ids)
+    asyncio.run(fetch_feeds())
+    video_cards = [VideoCard(video) for video in get_videos()]
+    for video_card in video_cards:
+        GLib.idle_add(list_box.append, video_card)
+    for video_card in video_cards:
+        GLib.idle_add(video_card.revealer.set_reveal_child, True)
+        sleep(0.2)
 
 
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-
-        # self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        # self.label = Gtk.Label(label="Hello World")
-        # self.box.append(self.label)
-        # self.box.append(self.scrolled_window)
 
         self.scrolled_window = Gtk.ScrolledWindow()
         self.set_child(self.scrolled_window)
@@ -130,17 +126,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.list_box = Gtk.ListBox()
         self.scrolled_window.set_child(self.list_box)
 
-        self.new_video_event = NewVideoEvent()
-        self.new_video_observer = NewVideoObserver(
-            self.new_video_event,
-            self.list_box,
-        )
-
         evk = Gtk.EventControllerKey.new()
         evk.connect("key-pressed", self.key_press)
         self.add_controller(evk)
 
-        thread = Thread(target=self.new_video_event.run)
+        thread = Thread(
+            target=init_backend,
+            kwargs=dict(list_box=self.list_box),
+        )
         thread.start()
 
 
@@ -163,8 +156,6 @@ class MainWindow(Gtk.ApplicationWindow):
                     return
                 if video_card.video.downloaded:
                     return
-                if not isinstance(video_card, VideoCard):
-                    return
                 f = video_card.progress_bar.set_fraction
 
                 def progress_hook(download: dict[str, Any]) -> None:
@@ -173,7 +164,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
                 thread = Thread(
                     target=video_card.video.download,
-                    kwargs=dict(with_notification=True, progress_hooks=[progress_hook])
+                    kwargs=dict(
+                        with_notification=True,
+                        progress_hooks=[progress_hook]
+                    ),
                 )
                 thread.start()
             case Gdk.KEY_p:
@@ -201,6 +195,7 @@ class MainWindow(Gtk.ApplicationWindow):
             case Gdk.KEY_q:
                 self.close()
 
+# Bba4_cB1A-4
 
 class MyApp(Adw.Application):
     def __init__(self, *args: Any, **kwargs: Any):

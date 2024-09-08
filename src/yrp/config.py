@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from datetime import timedelta
 from xdg_base_dirs import (
     xdg_config_home,
@@ -7,6 +8,8 @@ from xdg_base_dirs import (
 import tomllib
 import re
 import logging
+from pydantic import BaseModel
+
 
 logger = logging.getLogger(__name__)
 
@@ -33,15 +36,39 @@ logger.info(f'{thumbnail_dir=}')
 logger.info(f'{video_dir=}')
 logger.info(f'{config_file=}')
 
+channel_id_regex = re.compile(r"[\w-]{24}")
+
+@dataclass
+class ChannelEntry(BaseModel):
+    id: str
+    include: list[str] = field(default_factory=list)
+    exclude: list[str] = field(default_factory=list)
+    include_regex: list[str] = field(default_factory=list)
+    exclude_regex: list[str] = field(default_factory=list)
+
+
 if config_file.is_file():
     with config_file.open("rb") as file:
         config = tomllib.load(file)
-        channel_ids = set(config["channels"])
-        channel_id_regex = re.compile(r"[\w-]{24}")
-        for channel_id in config["channels"]:
-            if channel_id_regex.fullmatch(channel_id) is None:
-                raise ValueError(f"'{channel_id}' is not a valid channel ID")
+        channel_ids = set()_
+        for channel_entry in config["channels"]:
+            if isinstance(channel_entry, str):
+                channel_id = ChannelEntry(id=channel_entry)
+            elif isinstance(channel_entry, dict):
+                channel_ids = channel_entry["id"]
+                channel = ChannelEntry(**channel_entry)
+            else:
+                raise ValueError(
+                    'channel entry has invalid type: '
+                    f'{type(channel_entry)}'
+                )
+            if channel_id_regex.fullmatch(channel.id) is None:
+                raise ValueError(
+                    f"channel id '{channel.id}' "
+                        "is not a valid channel ID"
+                )
+            channel_ids.add(channgel_id)
 else:
-    channel_ids = set()
+    channel_ids: set[str] = set()
 
 no_older_than = timedelta(days=1)

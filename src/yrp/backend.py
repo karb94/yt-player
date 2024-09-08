@@ -1,7 +1,7 @@
 import asyncio
 import aiofiles
-from collections.abc import Callable, Set, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import InitVar, dataclass, field
 from datetime import datetime
 from time import mktime, struct_time
 from pathlib import Path
@@ -49,8 +49,8 @@ def get_video_path(id: str) -> Path:
     return config.video_dir.absolute() / f"{id}.{VIDEO_FORMAT}"
 
 
-def update_channels(channel_ids: Set[str]) -> None:
-    with db.Session() as session:
+def update_channels(channel_ids: set[str]) -> None:
+    with db.Session.begin() as session:
         query_result = session.scalars(select(db.Channel.id))
         existing_channel_ids = set(query_result)
         unused_channel_ids = existing_channel_ids - channel_ids
@@ -72,7 +72,6 @@ def update_channels(channel_ids: Set[str]) -> None:
                 for channel_id in new_channel_ids
             ]
             session.execute(insert(db.Channel), values)
-        session.commit()
 
 
 class Feed(TypedDict):
@@ -98,18 +97,23 @@ def extract_channel_id(feed: str) -> str:
         return match.group(1)
 
 
-
 @dataclass
 class Video:
-    id: str
-    publication_dt: datetime
-    title: str
-    channel_id: str
-    channel_title: str
+    video: InitVar[db.Video]
+    id: str = field(init=False)
+    publication_dt: datetime = field(init=False)
+    title: str = field(init=False)
+    channel_id: str = field(init=False)
+    channel_title: str = field(init=False)
 
-    def __post_init__(self) -> None:
-        self.path = get_video_path(self.id)
-        self.thumbnail_path = get_thumbnail_path(self.id)
+    def __post_init__(self, video: db.Video) -> None:
+        self.path = get_video_path(video.id)
+        self.thumbnail_path = get_thumbnail_path(video.id)
+        self.id = video.id
+        self.publication_dt = video.publication_dt
+        self.title = video.title
+        self.channel_id = video.channel.id
+        self.channel_title = video.channel.title or "Missing channel title"
 
     def download(self, **kwargs: Any) -> None:
         download_video_with_notification(self.id, **kwargs)
@@ -144,13 +148,13 @@ class Video:
 
     @watched.setter
     def watched(self, value: bool) -> None:
-        with db.Session() as session:
+        with db.Session.begin() as session:
             session.execute(
                 update(db.Video)
                 .filter_by(id=self.id)
                 .values(watched=value)
             )
-            self.delete_assets()
+        self.delete_assets()
 
     def delete_assets(self) -> None:
         delete_video_assets(self.id)
@@ -159,21 +163,21 @@ class Video:
         delete_video(self.id)
 
 
+def get_videos() -> Iterable[Video]:
+    cutoff_dt = datetime.now() - config.no_older_than
+    with db.Session() as session:
+        videos = session.scalars(
+            select(db.Video)
+            .where(db.Video.publication_dt > cutoff_dt)
+            .order_by(db.Video.publication_dt.desc())
+            .filter_by(watched=False)
+        )
+        return tuple(map(Video, videos))
+
+
 def create_video(id: str) -> Video:
     with db.Session() as session:
-        video = session.scalar(
-            select(db.Video)
-            .filter_by(id=id)
-        )
-        if video is None:
-            raise ValueError(f"db.Video with id {id} does not exists in the database")
-        return Video(
-            id=video.id,
-            publication_dt=video.publication_dt,
-            title=video.title,
-            channel_id=video.channel.id,
-            channel_title=video.channel.title or "Missing channel title",
-        )
+        return Video(session.get_one(db.Video, id))
 
 
 def make_video_row(entry: Entry, channel_id: str) -> db.Video:
@@ -187,19 +191,18 @@ def make_video_row(entry: Entry, channel_id: str) -> db.Video:
 
 
 async def upload_feed_data(channel_id: str, parsed_feed: ParsedFeed) -> None:
-    async with db.AsyncSession() as sa_session:
+    async with db.AsyncSession.begin() as sa_session:
         channel = await sa_session.get_one(db.Channel, channel_id)
         channel.title = parsed_feed['feed']['title']
         channel.last_updated = datetime.now()
         sa_session.add(channel)
-        query_result = await sa_session.scalars(select(db.Video.id))
-        existing_video_ids = set(query_result)
+        query = select(db.Video.id).filter_by(channel_id=channel_id)
+        existing_video_ids = set(await sa_session.scalars(query))
         sa_session.add_all(
             make_video_row(entry, channel_id)
             for entry in parsed_feed['entries']
             if entry["yt_videoid"] not in existing_video_ids
         )
-        await sa_session.commit()
 
 
 async def fetch_feed(
@@ -253,7 +256,6 @@ async def fetch_feeds(
 
 
 def main() -> None:
-    # db.bind_engines('test.db')
     update_channels(config.channel_ids)
     asyncio.run(fetch_feeds())
 
@@ -294,7 +296,7 @@ def clean_assets() -> None:
 
 
 def update_fields(id: str, **kwargs: Any) -> None:
-    with db.Session() as session:
+    with db.Session.begin() as session:
         session.execute(
             update(db.Video)
             .filter_by(id=id)
@@ -351,9 +353,10 @@ def delete_video_assets(id: str) -> None:
 
 def delete_video(id: str) -> None:
     delete_video_assets(id)
-    with db.Session() as session:
-        session.execute(
-            delete(db.Video)
-            .filter_by(id=id)
-        )
+    with db.Session.begin() as session:
+        with session.begin():
+            session.execute(
+                delete(db.Video)
+                .filter_by(id=id)
+            )
 

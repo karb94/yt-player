@@ -22,6 +22,7 @@
           mypy
           pandas
           pandas-stubs
+          pydantic
           pygobject-stubs
           pygobject3
           pytest

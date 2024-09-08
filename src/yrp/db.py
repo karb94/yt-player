@@ -13,12 +13,6 @@ class Base(DeclarativeBase):
     pass
 
 
-def bind_engines(db_path: str) -> None:
-    Session.configure(bind=create_engine(sync_db_url))
-    AsyncSession.configure(bind=create_async_engine(async_db_url))
-    Base.metadata.create_all(Session().get_bind())
-
-
 class Channel(Base):
     __tablename__ = "channel"
     id: Mapped[str] = mapped_column(String(24), primary_key=True)
